@@ -375,8 +375,9 @@ function handler(req, res) {
       return json(res, 200, { ok: true });
     });
   }
-  // Full importable module for a device (Shadowrocket one-tap install target).
-  // Token-authed like /loc.json; Shadowrocket fetches this URL and installs it.
+  // Plain "raw"-style URL that returns the full module text with this device's
+  // configUrl already baked in. Paste it into Shadowrocket › Config › Modules ›
+  // add from URL. Token-authed like /loc.json; served inline like a raw file.
   if (p === "/module.sgmodule" && m === "GET") {
     if (!url.searchParams.get("token"))
       return json(res, 401, { error: "missing token" });
@@ -385,7 +386,6 @@ function handler(req, res) {
     res.writeHead(200, {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store",
-      "Content-Disposition": 'attachment; filename="ios-location-spoofer.sgmodule"',
     });
     return res.end(fillModule(d, requestOrigin(req)));
   }
@@ -757,7 +757,7 @@ const PAGE = `<!doctype html>
   .btn-save{background:var(--spoof);color:var(--spoof-ink)}
   .btn-toggle{background:var(--surface-2);color:var(--text);border:1px solid var(--border)!important;flex:0 0 auto!important;padding:11px 14px!important}
   .cfg{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0;padding:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
-  .cfg #dt_import{background:var(--spoof);color:var(--spoof-ink);border-color:transparent;font-weight:700}
+  .cfg #dt_copymodurl{background:var(--spoof);color:var(--spoof-ink);border-color:transparent;font-weight:700}
   .cfg code{flex:1;min-width:0;font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .cfg button{background:transparent;border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600}
   .minis{display:flex;gap:8px}
@@ -1024,11 +1024,10 @@ function renderDetail(d){
     '</div>'+
     '<div class="row"><button class="btn btn-save" id="dt_save">Save location</button>'+
       '<button class="btn btn-toggle" id="dt_toggle">'+(d.enabled?"Real GPS":"Spoof")+'</button></div>'+
-    '<div class="cfg"><code id="dt_cfg">'+esc(location.origin)+'/loc.json?token=(hidden)</code>'+
-      '<button id="dt_import">Import → Shadowrocket</button>'+
-      '<button id="dt_copylink">Copy link</button>'+
+    '<div class="cfg"><code id="dt_cfg">'+esc(location.origin)+'/module.sgmodule?token=(hidden)</code>'+
+      '<button id="dt_copymodurl">Copy URL</button>'+
       '<button id="dt_copymod">Module text</button>'+
-      '<button id="dt_copyurl">URL</button></div>'+
+      '<button id="dt_copyurl">configUrl</button></div>'+
     '<div class="reportbox'+(d.reportReal?' on':'')+'">'+
       '<div class="rb-txt"><b>Report real location to panel</b><span>'+
         (d.reportReal?('ON — this device sends its real GPS here'+(rl?' · last fix '+ago(rl.ts):'')):'Off — real location is not collected')+
@@ -1055,8 +1054,7 @@ function renderDetail(d){
     var wasEnabled=d.enabled;
     api("POST","/api/devices/"+d.id+"/enable",{enabled:!wasEnabled}).then(function(r){ if(r.ok){toast(wasEnabled?"Set to real GPS passthrough":"Spoofing on");refresh();} });
   });
-  $("dt_import").addEventListener("click",function(){ doImport(d.id); });
-  $("dt_copylink").addEventListener("click",function(){ copyImportLink(d.id); });
+  $("dt_copymodurl").addEventListener("click",function(){ copyModuleUrl(d.id); });
   $("dt_copymod").addEventListener("click",function(){ copyModule(d.id); });
   $("dt_copyurl").addEventListener("click",function(){ revealAndCopy(d.id); });
   $("dt_regen").addEventListener("click",function(){ if(confirm("Regenerate token? The current configUrl stops working."))
@@ -1071,7 +1069,7 @@ function renderDetail(d){
 }
 function setSpoofFromMap(la,lo){ if(window._setPending)window._setPending(la,lo); else toast("Select a device first"); }
 function revealToken(id){ return api("GET","/api/devices/"+id,null).then(function(r){ if(r.ok)showToken(r.body.token); return r.ok?r.body.token:null; }); }
-function showToken(tok){ var c=$("dt_cfg"); if(c)c.textContent=location.origin+"/loc.json?token="+tok; }
+function showToken(tok){ var c=$("dt_cfg"); if(c)c.textContent=location.origin+"/module.sgmodule?token="+tok; }
 function revealAndCopy(id){ revealToken(id).then(function(tok){ if(!tok)return; copyText(location.origin+"/loc.json?token="+tok,"configUrl copied"); }); }
 function copyText(t,okMsg){
   if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(function(){toast(okMsg);}).catch(function(){prompt("Copy:",t);});
@@ -1089,11 +1087,10 @@ function buildModule(tok,sp){
     .replace("__CFGURL__", location.origin+"/loc.json?token="+tok);
 }
 function copyModule(id){ revealToken(id).then(function(tok){ if(!tok)return; var d=byId(id); copyText(buildModule(tok,d&&d.spoofed),"Full module copied — paste into Shadowrocket › Modules"); }); }
-// One-tap Shadowrocket install link pointing at this panel's /module.sgmodule for
-// the device. The inner URL is encoded so its ?token= doesn't break parsing.
-function importLink(tok){ return "shadowrocket://install?module="+encodeURIComponent(location.origin+"/module.sgmodule?token="+tok); }
-function doImport(id){ revealToken(id).then(function(tok){ if(!tok)return; toast("Opening Shadowrocket…"); location.href=importLink(tok); }); }
-function copyImportLink(id){ revealToken(id).then(function(tok){ if(!tok)return; copyText(importLink(tok),"Import link copied — open it on the iPhone (Shadowrocket installed)"); }); }
+// Plain "raw"-style module URL for this device (module text + configUrl baked in).
+// Paste it into Shadowrocket › Config › Modules › + › add from URL.
+function moduleUrl(tok){ return location.origin+"/module.sgmodule?token="+tok; }
+function copyModuleUrl(id){ revealToken(id).then(function(tok){ if(!tok)return; copyText(moduleUrl(tok),"Module URL copied — Shadowrocket › Config › Modules › + › paste URL"); }); }
 function fetchAlt(la,lo){ return fetch("https://api.open-meteo.com/v1/elevation?latitude="+la+"&longitude="+lo).then(function(r){return r.json();}).then(function(d){return (d&&d.elevation&&d.elevation.length)?d.elevation[0]:null;}).catch(function(){return null;}); }
 
 function searchPlace(q){
