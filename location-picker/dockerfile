@@ -1,12 +1,12 @@
-# Build from the REPOSITORY ROOT so the .sgmodule (the Copy-module / import source
-# of truth) is in the build context:
-#   docker build -f location-picker/dockerfile -t location-panel .
+# Build context is THIS directory (location-picker/) — Coolify runs
+#   docker build -f location-picker/dockerfile  <...>  location-picker
+# so every COPY path is relative to location-picker/. The repo-root
+# ios-location-spoofer.sgmodule is OUTSIDE this context and cannot be copied;
+# server.js ships an identical embedded copy of the module and uses it as the
+# fallback for "Copy module" / the Shadowrocket import link, so this is fine.
 FROM node:20-alpine
 WORKDIR /app
-COPY location-picker/server.js .
-# Source of truth for "Copy module" and the Shadowrocket import link. Optional:
-# server.js falls back to an embedded copy if this file is absent.
-COPY ios-location-spoofer.sgmodule .
+COPY server.js .
 # data.json (devices/users) is written here at runtime — mount a volume to persist.
 ENV PORT=8080
 EXPOSE 8080
