@@ -260,7 +260,7 @@ const EMBEDDED_MODULE = [
   "#!homepage=https://github.com/mekos2772/ios-location-spoofer",
   "",
   "[Script]",
-  "iOS Location Spoofer = type=http-response,pattern=^https?:\\/\\/(?:gs-loc(?:-cn)?\\.apple\\.com|bluedot\\.is\\.autonavi\\.com(?:\\.gds\\.alibabadns\\.com)?)\\/clls\\/wloc(?:\\?.*)?$,requires-body=1,binary-body-mode=1,max-size=1048576,timeout=10,script-path=https://raw.githubusercontent.com/mekos2772/ios-location-spoofer/main/location-spoofer.js,argument=mode=response&latitude=37.3349&longitude=-122.00902&horizontalAccuracy=39&verticalAccuracy=1000&altitude=530&debug=false",
+  "iOS Location Spoofer = type=http-response,pattern=^https?:\\/\\/(?:gs-loc(?:-cn)?\\.apple\\.com|bluedot\\.is\\.autonavi\\.com(?:\\.gds\\.alibabadns\\.com)?)\\/clls\\/wloc(?:\\?.*)?$,requires-body=1,binary-body-mode=1,max-size=1048576,timeout=10,script-path=https://raw.githubusercontent.com/jeQuentY/ios-location-spoofer/refs/heads/main/location-spoofer.js,argument=mode=response&latitude=37.3349&longitude=-122.00902&horizontalAccuracy=39&verticalAccuracy=1000&altitude=530&debug=false",
   "",
   "[MITM]",
   "hostname = %APPEND% gs-loc.apple.com, gs-loc-cn.apple.com, bluedot.is.autonavi.com, bluedot.is.autonavi.com.gds.alibabadns.com",
@@ -277,7 +277,10 @@ function moduleTextToTemplate(text) {
   // ...and append the panel's configUrl to the argument (last field on that line).
   const lines = t.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].indexOf("argument=") >= 0 && lines[i].indexOf("configUrl=") < 0) {
+    if (
+      lines[i].indexOf("argument=") >= 0 &&
+      lines[i].indexOf("configUrl=") < 0
+    ) {
       lines[i] = lines[i].replace(/\s+$/, "") + "&configUrl=__CFGURL__";
     }
   }
@@ -301,7 +304,9 @@ function loadModuleTemplate() {
       // try next candidate
     }
   }
-  console.log("Copy-module source: embedded fallback (sgmodule file not found)");
+  console.log(
+    "Copy-module source: embedded fallback (sgmodule file not found)",
+  );
   return moduleTextToTemplate(EMBEDDED_MODULE);
 }
 const MODULE_TEMPLATE = loadModuleTemplate();
@@ -312,10 +317,19 @@ function fillModule(d, origin) {
   const s = d.spoofed || {};
   const num = (v, dflt) =>
     v != null && v !== "" && isFinite(Number(v)) ? Number(v) : dflt;
-  return MODULE_TEMPLATE.replace("__LAT__", num(s.latitude, DEFAULT_SPOOF.latitude))
+  return MODULE_TEMPLATE.replace(
+    "__LAT__",
+    num(s.latitude, DEFAULT_SPOOF.latitude),
+  )
     .replace("__LNG__", num(s.longitude, DEFAULT_SPOOF.longitude))
-    .replace("__HACC__", num(s.horizontalAccuracy, DEFAULT_SPOOF.horizontalAccuracy))
-    .replace("__VACC__", num(s.verticalAccuracy, DEFAULT_SPOOF.verticalAccuracy))
+    .replace(
+      "__HACC__",
+      num(s.horizontalAccuracy, DEFAULT_SPOOF.horizontalAccuracy),
+    )
+    .replace(
+      "__VACC__",
+      num(s.verticalAccuracy, DEFAULT_SPOOF.verticalAccuracy),
+    )
     .replace("__ALT__", num(s.altitude, DEFAULT_SPOOF.altitude))
     .replace("__CFGURL__", origin + "/loc.json?token=" + d.token);
 }
