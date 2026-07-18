@@ -207,6 +207,10 @@ function spooferView(d) {
     altitude: s.altitude,
     horizontalAccuracy: s.horizontalAccuracy,
     verticalAccuracy: s.verticalAccuracy,
+    // Tells the on-device script whether to POST its real coordinates back.
+    // This is the ONLY switch for real-location reporting, so the dashboard's
+    // "reporting real location" indicator can never be out of sync with it.
+    reportReal: d.reportReal === true,
   };
 }
 // What the dashboard sees (device token not included unless owner/admin asks).
@@ -216,6 +220,7 @@ function deviceView(d) {
     name: d.name,
     owner: d.owner,
     enabled: d.enabled !== false,
+    reportReal: d.reportReal === true,
     spoofed: d.spoofed,
     real: d.real || null,
     lastSeen: d.lastSeen || null,
@@ -240,6 +245,84 @@ const DEFAULT_SPOOF = {
   horizontalAccuracy: 39,
   verticalAccuracy: 1000,
 };
+
+// The full proxy module the dashboard hands out for "Copy module". It is sourced
+// from the real ios-location-spoofer.sgmodule so editing that file changes what
+// users copy (single source of truth). We convert its argument line into a
+// template: the per-device coordinates become __PLACEHOLDERS__ and a &configUrl=
+// pointing at this panel is appended. The browser fills them in per device.
+//
+// Embedded fallback below keeps the feature working where the file is not shipped
+// next to server.js (e.g. the minimal Docker image). Keep it in sync with the file.
+const EMBEDDED_MODULE = [
+  "#!name=iOS Location Spoofer",
+  "#!desc=拦截 Apple 定位服务器回应的 GPS 坐标，替换成自定义位置。适用于 Shadowrocket。",
+  "#!homepage=https://github.com/mekos2772/ios-location-spoofer",
+  "",
+  "[Script]",
+  "iOS Location Spoofer = type=http-response,pattern=^https?:\\/\\/(?:gs-loc(?:-cn)?\\.apple\\.com|bluedot\\.is\\.autonavi\\.com(?:\\.gds\\.alibabadns\\.com)?)\\/clls\\/wloc(?:\\?.*)?$,requires-body=1,binary-body-mode=1,max-size=1048576,timeout=10,script-path=https://raw.githubusercontent.com/mekos2772/ios-location-spoofer/main/location-spoofer.js,argument=mode=response&latitude=37.3349&longitude=-122.00902&horizontalAccuracy=39&verticalAccuracy=1000&altitude=530&debug=false",
+  "",
+  "[MITM]",
+  "hostname = %APPEND% gs-loc.apple.com, gs-loc-cn.apple.com, bluedot.is.autonavi.com, bluedot.is.autonavi.com.gds.alibabadns.com",
+].join("\n");
+
+function moduleTextToTemplate(text) {
+  // Swap the per-device coordinate values for placeholders...
+  let t = String(text)
+    .replace(/([?&]latitude=)[^&\r\n]*/, "$1__LAT__")
+    .replace(/([?&]longitude=)[^&\r\n]*/, "$1__LNG__")
+    .replace(/([?&]horizontalAccuracy=)[^&\r\n]*/, "$1__HACC__")
+    .replace(/([?&]verticalAccuracy=)[^&\r\n]*/, "$1__VACC__")
+    .replace(/([?&]altitude=)[^&\r\n]*/, "$1__ALT__");
+  // ...and append the panel's configUrl to the argument (last field on that line).
+  const lines = t.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].indexOf("argument=") >= 0 && lines[i].indexOf("configUrl=") < 0) {
+      lines[i] = lines[i].replace(/\s+$/, "") + "&configUrl=__CFGURL__";
+    }
+  }
+  return lines.join("\n");
+}
+
+function loadModuleTemplate() {
+  const candidates = [
+    process.env.MODULE_FILE,
+    path.join(__dirname, "ios-location-spoofer.sgmodule"),
+    path.join(__dirname, "..", "ios-location-spoofer.sgmodule"),
+  ].filter(Boolean);
+  for (let i = 0; i < candidates.length; i++) {
+    try {
+      const txt = fs.readFileSync(candidates[i], "utf8");
+      if (txt && txt.indexOf("argument=") >= 0) {
+        console.log("Copy-module source: " + candidates[i]);
+        return moduleTextToTemplate(txt);
+      }
+    } catch (e) {
+      // try next candidate
+    }
+  }
+  console.log("Copy-module source: embedded fallback (sgmodule file not found)");
+  return moduleTextToTemplate(EMBEDDED_MODULE);
+}
+const MODULE_TEMPLATE = loadModuleTemplate();
+
+// Render the full importable module for one device: its saved coords as the seed
+// argument values, and this panel's /loc.json?token= as the live configUrl.
+function fillModule(d, origin) {
+  const s = d.spoofed || {};
+  const num = (v, dflt) =>
+    v != null && v !== "" && isFinite(Number(v)) ? Number(v) : dflt;
+  return MODULE_TEMPLATE.replace("__LAT__", num(s.latitude, DEFAULT_SPOOF.latitude))
+    .replace("__LNG__", num(s.longitude, DEFAULT_SPOOF.longitude))
+    .replace("__HACC__", num(s.horizontalAccuracy, DEFAULT_SPOOF.horizontalAccuracy))
+    .replace("__VACC__", num(s.verticalAccuracy, DEFAULT_SPOOF.verticalAccuracy))
+    .replace("__ALT__", num(s.altitude, DEFAULT_SPOOF.altitude))
+    .replace("__CFGURL__", origin + "/loc.json?token=" + d.token);
+}
+function requestOrigin(req) {
+  const proto = isHttps(req) ? "https" : "http";
+  return proto + "://" + (req.headers.host || "localhost");
+}
 
 // ---------- request handler ----------
 function handler(req, res) {
@@ -266,6 +349,11 @@ function handler(req, res) {
   if (p === "/report" && m === "POST") {
     const d = findDeviceByToken(url.searchParams.get("token"));
     if (!d) return json(res, 403, { error: "bad token" });
+    // Real-location collection is opt-in per device. If the owner/admin hasn't
+    // enabled it, drop the report — nothing is stored. This keeps collection and
+    // the dashboard's visible indicator bound to the same single flag.
+    if (d.reportReal !== true)
+      return json(res, 200, { ok: true, ignored: true });
     return readBody(req, function (j) {
       if (!j) return json(res, 400, { error: "bad json" });
       const la = Number(j.lat),
@@ -286,6 +374,20 @@ function handler(req, res) {
       saveDB();
       return json(res, 200, { ok: true });
     });
+  }
+  // Full importable module for a device (Shadowrocket one-tap install target).
+  // Token-authed like /loc.json; Shadowrocket fetches this URL and installs it.
+  if (p === "/module.sgmodule" && m === "GET") {
+    if (!url.searchParams.get("token"))
+      return json(res, 401, { error: "missing token" });
+    const d = findDeviceByToken(url.searchParams.get("token"));
+    if (!d) return json(res, 403, { error: "bad token" });
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Disposition": 'attachment; filename="ios-location-spoofer.sgmodule"',
+    });
+    return res.end(fillModule(d, requestOrigin(req)));
   }
 
   // ===== auth =====
@@ -344,6 +446,7 @@ function handler(req, res) {
           owner: owner,
           token: newToken(),
           enabled: true,
+          reportReal: false,
           spoofed: Object.assign({}, DEFAULT_SPOOF),
           real: null,
           lastSeen: null,
@@ -425,6 +528,18 @@ function handler(req, res) {
         saveDB();
         return json(res, 200, { token: d.token });
       }
+      // Owner or admin toggles whether this device reports its real location.
+      // Turning it off also discards any real location already collected.
+      if (sub === "/reportreal" && m === "POST")
+        return readBody(req, function (j) {
+          d.reportReal = !!(j && j.enabled === true);
+          if (!d.reportReal) {
+            d.real = null;
+            d.lastReport = null;
+          }
+          saveDB();
+          return json(res, 200, { device: deviceView(d) });
+        });
       return json(res, 404, { error: "not found" });
     }
 
@@ -591,6 +706,10 @@ const PAGE = `<!doctype html>
   .top .role{font-size:10px;text-transform:uppercase;letter-spacing:.08em;padding:2px 7px;border:1px solid var(--border);border-radius:999px;color:var(--muted);margin-left:6px}
   .top .logout{background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:7px 12px;font-size:13px;font-weight:600}
 
+  .discbar{padding:10px 16px;background:color-mix(in srgb,var(--warn) 20%,var(--surface));border-bottom:1px solid color-mix(in srgb,var(--warn) 45%,var(--border));color:var(--text);font-size:13px;line-height:1.45;display:flex;align-items:flex-start;gap:9px}
+  .discbar .ic{flex:none;font-size:15px;line-height:1.3}
+  .discbar b{color:var(--warn)}
+
   .wrap{flex:1;min-height:0;display:flex}
   #map{flex:1;min-height:0;background:var(--surface-2)}
   .leaflet-container{background:var(--surface-2)}
@@ -613,6 +732,7 @@ const PAGE = `<!doctype html>
   .dev .badge{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;padding:2px 7px;border-radius:999px}
   .dev .badge.spoof{color:var(--spoof);background:color-mix(in srgb,var(--spoof) 15%,transparent)}
   .dev .badge.real{color:var(--warn);background:color-mix(in srgb,var(--warn) 15%,transparent)}
+  .dev .badge.report{color:var(--real);background:color-mix(in srgb,var(--real) 16%,transparent)}
 
   .detail{border-top:1px solid var(--border);padding:12px 14px;overflow:auto;max-height:56%}
   .detail.hidden{display:none}
@@ -636,12 +756,19 @@ const PAGE = `<!doctype html>
   .row .btn{flex:1;padding:11px;border:0;border-radius:9px;font-size:14px;font-weight:700}
   .btn-save{background:var(--spoof);color:var(--spoof-ink)}
   .btn-toggle{background:var(--surface-2);color:var(--text);border:1px solid var(--border)!important;flex:0 0 auto!important;padding:11px 14px!important}
-  .cfg{display:flex;align-items:center;gap:8px;margin:8px 0;padding:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
+  .cfg{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0;padding:8px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
+  .cfg #dt_import{background:var(--spoof);color:var(--spoof-ink);border-color:transparent;font-weight:700}
   .cfg code{flex:1;min-width:0;font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .cfg button{background:transparent;border:1px solid var(--border);color:var(--text);border-radius:7px;padding:5px 9px;font-size:11px;font-weight:600}
   .minis{display:flex;gap:8px}
   .minis button{flex:1;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:8px;font-size:12px;font-weight:600}
   .minis button.danger{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 40%,var(--border))}
+  .reportbox{display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px;border:1px solid var(--border);border-radius:9px;background:var(--surface-2)}
+  .reportbox.on{border-color:color-mix(in srgb,var(--warn) 50%,var(--border));background:color-mix(in srgb,var(--warn) 12%,var(--surface-2))}
+  .reportbox .rb-txt{flex:1;display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--muted)}
+  .reportbox .rb-txt b{font-size:13px;color:var(--text)}
+  .reportbox button{flex:none;background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 12px;font-size:13px;font-weight:600}
+  .reportbox button.on{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,var(--border))}
 
   .users{flex:1;overflow:auto;padding:16px;max-width:720px}
   .users h2{margin:0 0 12px;font-size:16px}
@@ -700,6 +827,8 @@ const PAGE = `<!doctype html>
     <button class="logout" id="logout">Sign out</button>
   </div>
 
+  <div class="discbar hidden" id="discbar"></div>
+
   <div class="wrap" id="view_map">
     <div id="map"></div>
     <div class="side">
@@ -739,6 +868,8 @@ var ME={username:"",role:"user"};
 var DEVICES=[];
 var SEL=null;
 var map, layers={};
+var pendMk=null, PENDING=null;
+var MODULE_TMPL=${JSON.stringify(MODULE_TEMPLATE)};
 
 function doLogin(){
   var u=$("li_user").value.trim(), p=$("li_pass").value;
@@ -790,11 +921,28 @@ function refresh(){
   return api("GET","/api/devices").then(function(r){
     if(!r.ok)return;
     DEVICES=r.body.devices||[];
-    renderList(); drawMap();
-    if(SEL){ var d=byId(SEL); if(d) renderDetail(d); else { SEL=null; $("detail").classList.add("hidden"); } }
+    renderList(); drawMap(); renderDisclosure();
+    if(SEL){ var d=byId(SEL); if(d) renderDetail(d); else { SEL=null; clearPending(); $("detail").classList.add("hidden"); } }
   });
 }
 function byId(id){ for(var i=0;i<DEVICES.length;i++)if(DEVICES[i].id===id)return DEVICES[i]; return null; }
+
+// Prominent, always-on banner whenever any visible device is reporting its real
+// location. Owners see it for their own devices, so collection is never silent.
+function renderDisclosure(){
+  var bar=$("discbar"); if(!bar)return;
+  var on=DEVICES.filter(function(d){return d.reportReal;});
+  if(!on.length){ bar.classList.add("hidden"); bar.innerHTML=""; return; }
+  var names=on.map(function(d){return esc(d.name);}).join(", ");
+  var msg;
+  if(ME.role==="admin"){
+    msg='<b>Real-location reporting is ON</b> for '+on.length+' device'+(on.length>1?'s':'')+': '+names+'. Device owners see this same notice.';
+  } else {
+    msg='<b>Your real location is being shared</b> with the panel administrators for: '+names+'. This device sends its actual GPS here. Turn it off with the "Report real location" switch in the device panel.';
+  }
+  bar.innerHTML='<span class="ic">📍</span><span>'+msg+'</span>';
+  bar.classList.remove("hidden");
+}
 
 function renderList(){
   var box=$("devList");
@@ -810,7 +958,8 @@ function renderList(){
     el.innerHTML=
       '<div class="r1"><span class="online '+(online(d)?"on":"")+'"></span>'+
       '<span class="name">'+esc(d.name)+'</span>'+ownerTag+
-      '<span class="badge '+(d.enabled?"spoof":"real")+'">'+(d.enabled?"spoof":"real GPS")+'</span></div>'+
+      '<span class="badge '+(d.enabled?"spoof":"real")+'">'+(d.enabled?"spoof":"real GPS")+'</span>'+
+      (d.reportReal?'<span class="badge report">reporting</span>':'')+'</div>'+
       '<div class="r2"><span>seen '+ago(d.lastSeen)+'</span>'+
       (rl?'<span>real to spoof '+fmtDist(dist)+'</span>':'<span>real: not reported</span>')+'</div>';
     el.addEventListener("click",function(){ select(d.id); });
@@ -818,13 +967,23 @@ function renderList(){
   });
 }
 
-function select(id){ SEL=id; renderList(); var d=byId(id); if(d){ renderDetail(d); focusDevice(d); } }
+function select(id){ if(SEL!==id)clearPending(); SEL=id; renderList(); var d=byId(id); if(d){ renderDetail(d); focusDevice(d); } }
 function focusDevice(d){
   var pts=[]; if(d.spoofed)pts.push([d.spoofed.latitude,d.spoofed.longitude]);
   if(d.real)pts.push([d.real.latitude,d.real.longitude]);
   if(pts.length===1)map.setView(pts[0],14);
   else if(pts.length===2)map.fitBounds(pts,{padding:[60,60]});
 }
+// Dashed hollow-green marker for a picked-but-unsaved point, so the choice shows
+// on the map immediately instead of only after Save.
+function showPending(la,lo){
+  if(!map)return;
+  if(!pendMk){
+    pendMk=L.circleMarker([la,lo],{radius:9,color:"#3ddc84",fillColor:"#3ddc84",fillOpacity:.28,weight:2,dashArray:"3 3"})
+      .bindTooltip("unsaved",{direction:"top"}).addTo(map);
+  } else pendMk.setLatLng([la,lo]);
+}
+function clearPending(){ PENDING=null; if(pendMk&&map){ map.removeLayer(pendMk); } pendMk=null; }
 
 function drawMap(){
   Object.keys(layers).forEach(function(id){ if(!byId(id)){ map.removeLayer(layers[id]); delete layers[id]; } });
@@ -865,39 +1024,76 @@ function renderDetail(d){
     '</div>'+
     '<div class="row"><button class="btn btn-save" id="dt_save">Save location</button>'+
       '<button class="btn btn-toggle" id="dt_toggle">'+(d.enabled?"Real GPS":"Spoof")+'</button></div>'+
-    '<div class="cfg"><code id="dt_cfg">'+esc(location.origin)+'/loc.json?token=(hidden)</code><button id="dt_copy">Copy</button><button id="dt_reveal">Reveal</button></div>'+
+    '<div class="cfg"><code id="dt_cfg">'+esc(location.origin)+'/loc.json?token=(hidden)</code>'+
+      '<button id="dt_import">Import → Shadowrocket</button>'+
+      '<button id="dt_copylink">Copy link</button>'+
+      '<button id="dt_copymod">Module text</button>'+
+      '<button id="dt_copyurl">URL</button></div>'+
+    '<div class="reportbox'+(d.reportReal?' on':'')+'">'+
+      '<div class="rb-txt"><b>Report real location to panel</b><span>'+
+        (d.reportReal?('ON — this device sends its real GPS here'+(rl?' · last fix '+ago(rl.ts):'')):'Off — real location is not collected')+
+      '</span></div>'+
+      '<button id="dt_report" class="'+(d.reportReal?'on':'')+'">'+(d.reportReal?'Turn off':'Turn on')+'</button>'+
+    '</div>'+
     '<div class="minis"><button id="dt_regen">Regenerate token</button><button class="danger" id="dt_delete">Delete device</button></div>';
 
-  var pending=null;
   $("dt_name").addEventListener("change",function(){ api("POST","/api/devices/"+d.id+"/rename",{name:$("dt_name").value}).then(function(){refresh();}); });
   $("dt_search").addEventListener("click",function(){ searchPlace($("dt_q").value); });
   $("dt_q").addEventListener("keydown",function(e){ if(e.key==="Enter")searchPlace($("dt_q").value); });
-  window._setPending=function(la,lo){ pending={lat:la,lng:lo}; var rr=$("dt_results"); if(rr)rr.classList.remove("show");
+  window._setPending=function(la,lo){ PENDING={lat:la,lng:lo}; showPending(la,lo); var rr=$("dt_results"); if(rr)rr.classList.remove("show");
     var sv=$("dt_spval"); if(sv)sv.textContent=la.toFixed(5)+", "+lo.toFixed(5)+" (unsaved)";
     fetchAlt(la,lo).then(function(a){ if(a!=null&&$("dt_alt"))$("dt_alt").value=Math.round(a); }); };
+  // Re-show the unsaved marker after an auto-refresh re-renders this panel.
+  if(PENDING){ showPending(PENDING.lat,PENDING.lng); var sv0=$("dt_spval"); if(sv0)sv0.textContent=PENDING.lat.toFixed(5)+", "+PENDING.lng.toFixed(5)+" (unsaved)"; }
   $("dt_save").addEventListener("click",function(){
-    var la=pending?pending.lat:sp.latitude, lo=pending?pending.lng:sp.longitude;
+    var la=PENDING?PENDING.lat:sp.latitude, lo=PENDING?PENDING.lng:sp.longitude;
     if(la==null){toast("Pick a point first");return;}
     api("POST","/api/devices/"+d.id+"/spoof",{lat:la,lng:lo,altitude:$("dt_alt").value,horizontalAccuracy:$("dt_hacc").value,verticalAccuracy:$("dt_vacc").value})
-      .then(function(r){ if(r.ok){pending=null;toast("Saved — device applies on next location refresh");refresh();}else toast("Save failed"); });
+      .then(function(r){ if(r.ok){clearPending();toast("Saved — device applies on next location refresh");refresh();}else toast("Save failed"); });
   });
   $("dt_toggle").addEventListener("click",function(){
     var wasEnabled=d.enabled;
     api("POST","/api/devices/"+d.id+"/enable",{enabled:!wasEnabled}).then(function(r){ if(r.ok){toast(wasEnabled?"Set to real GPS passthrough":"Spoofing on");refresh();} });
   });
-  $("dt_copy").addEventListener("click",function(){ revealAndCopy(d.id); });
-  $("dt_reveal").addEventListener("click",function(){ revealToken(d.id); });
+  $("dt_import").addEventListener("click",function(){ doImport(d.id); });
+  $("dt_copylink").addEventListener("click",function(){ copyImportLink(d.id); });
+  $("dt_copymod").addEventListener("click",function(){ copyModule(d.id); });
+  $("dt_copyurl").addEventListener("click",function(){ revealAndCopy(d.id); });
   $("dt_regen").addEventListener("click",function(){ if(confirm("Regenerate token? The current configUrl stops working."))
     api("POST","/api/devices/"+d.id+"/token",null).then(function(r){ if(r.ok){toast("New token generated");showToken(r.body.token);} }); });
   $("dt_delete").addEventListener("click",function(){ if(confirm("Delete this device?"))
-    api("DELETE","/api/devices/"+d.id,null).then(function(){ SEL=null;$("detail").classList.add("hidden");toast("Deleted");refresh(); }); });
+    api("DELETE","/api/devices/"+d.id,null).then(function(){ SEL=null;clearPending();$("detail").classList.add("hidden");toast("Deleted");refresh(); }); });
+  $("dt_report").addEventListener("click",function(){
+    var turnOn=!d.reportReal;
+    if(turnOn && !confirm("Turn ON real-location reporting for this device? Its actual GPS will be sent to this panel and shown to administrators. The device owner sees a notice while this is on."))return;
+    api("POST","/api/devices/"+d.id+"/reportreal",{enabled:turnOn}).then(function(r){ if(r.ok){toast(turnOn?"Real-location reporting ON":"Real-location reporting off");refresh();}else toast("Failed"); });
+  });
 }
 function setSpoofFromMap(la,lo){ if(window._setPending)window._setPending(la,lo); else toast("Select a device first"); }
 function revealToken(id){ return api("GET","/api/devices/"+id,null).then(function(r){ if(r.ok)showToken(r.body.token); return r.ok?r.body.token:null; }); }
 function showToken(tok){ var c=$("dt_cfg"); if(c)c.textContent=location.origin+"/loc.json?token="+tok; }
-function revealAndCopy(id){ revealToken(id).then(function(tok){ if(!tok)return; var u=location.origin+"/loc.json?token="+tok;
-  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(u).then(function(){toast("configUrl copied");}).catch(function(){prompt("Copy:",u);});
-  else prompt("Copy:",u); }); }
+function revealAndCopy(id){ revealToken(id).then(function(tok){ if(!tok)return; copyText(location.origin+"/loc.json?token="+tok,"configUrl copied"); }); }
+function copyText(t,okMsg){
+  if(navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(t).then(function(){toast(okMsg);}).catch(function(){prompt("Copy:",t);});
+  else prompt("Copy:",t);
+}
+// Build the full [Script] module line for this device: token + its saved coords.
+function buildModule(tok,sp){
+  sp=sp||{};
+  return MODULE_TMPL
+    .replace("__LAT__", sp.latitude!=null?sp.latitude:37.3349)
+    .replace("__LNG__", sp.longitude!=null?sp.longitude:-122.00902)
+    .replace("__HACC__", sp.horizontalAccuracy!=null?sp.horizontalAccuracy:39)
+    .replace("__VACC__", sp.verticalAccuracy!=null?sp.verticalAccuracy:1000)
+    .replace("__ALT__", sp.altitude!=null?sp.altitude:530)
+    .replace("__CFGURL__", location.origin+"/loc.json?token="+tok);
+}
+function copyModule(id){ revealToken(id).then(function(tok){ if(!tok)return; var d=byId(id); copyText(buildModule(tok,d&&d.spoofed),"Full module copied — paste into Shadowrocket › Modules"); }); }
+// One-tap Shadowrocket install link pointing at this panel's /module.sgmodule for
+// the device. The inner URL is encoded so its ?token= doesn't break parsing.
+function importLink(tok){ return "shadowrocket://install?module="+encodeURIComponent(location.origin+"/module.sgmodule?token="+tok); }
+function doImport(id){ revealToken(id).then(function(tok){ if(!tok)return; toast("Opening Shadowrocket…"); location.href=importLink(tok); }); }
+function copyImportLink(id){ revealToken(id).then(function(tok){ if(!tok)return; copyText(importLink(tok),"Import link copied — open it on the iPhone (Shadowrocket installed)"); }); }
 function fetchAlt(la,lo){ return fetch("https://api.open-meteo.com/v1/elevation?latitude="+la+"&longitude="+lo).then(function(r){return r.json();}).then(function(d){return (d&&d.elevation&&d.elevation.length)?d.elevation[0]:null;}).catch(function(){return null;}); }
 
 function searchPlace(q){

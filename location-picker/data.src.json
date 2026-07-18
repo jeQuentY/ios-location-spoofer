@@ -1,0 +1,14 @@
+{
+  "users": {
+    "admin": {
+      "role": "admin",
+      "salt": "d5d5cf3e45168d3d5a10ddcdb586d8a1",
+      "hash": "144eb37ee5960dac027eec73e31767f0f009b893adb53759ed991373bcee9979ca310dc186f20d78a935c1e29015819dc77bbb12453b0dfb14467deed6f28814",
+      "createdAt": 1784394894283
+    }
+  },
+  "devices": {},
+  "meta": {
+    "sessionSecret": "805fcb207dd53e2bb6c57433f3bbb06a3a52f5d682751ffb82f133d22794b42f"
+  }
+}

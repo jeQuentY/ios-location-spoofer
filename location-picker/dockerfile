@@ -1,7 +1,13 @@
+# Build from the REPOSITORY ROOT so the .sgmodule (the Copy-module / import source
+# of truth) is in the build context:
+#   docker build -f location-picker/dockerfile -t location-panel .
 FROM node:20-alpine
 WORKDIR /app
-COPY server.js .
-# loc.json gets written here at runtime
+COPY location-picker/server.js .
+# Source of truth for "Copy module" and the Shadowrocket import link. Optional:
+# server.js falls back to an embedded copy if this file is absent.
+COPY ios-location-spoofer.sgmodule .
+# data.json (devices/users) is written here at runtime — mount a volume to persist.
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "server.js"]
