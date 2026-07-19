@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+data.json
+data.src.json
+.dev.vars
+.env
+*.md
+cloudflare-webui
+worker

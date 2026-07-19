@@ -1,13 +1,23 @@
-# Build context is THIS directory (location-picker/) — Coolify runs
-#   docker build -f location-picker/dockerfile  <...>  location-picker
-# so every COPY path is relative to location-picker/. The repo-root
-# ios-location-spoofer.sgmodule is OUTSIDE this context and cannot be copied;
-# server.js ships an identical embedded copy of the module and uses it as the
-# fallback for "Copy module" / the Shadowrocket import link, so this is fine.
+# Build context is THIS directory (location-picker/). Coolify runs:
+#   docker build -f location-picker/dockerfile <...> location-picker
+# so every COPY path is relative to location-picker/.
+#
+# v2 needs npm deps (pg) and ships the frontend from public/, so we copy the
+# whole app and install production deps. Storage is PostgreSQL — set DATABASE_URL
+# (Coolify wires it automatically when you attach a Postgres service).
 FROM node:20-alpine
 WORKDIR /app
-COPY server.js .
-# data.json (devices/users) is written here at runtime — mount a volume to persist.
+
+# Install deps first for better layer caching.
+COPY package.json package-lock.json* ./
+RUN npm install --omit=dev --no-audit --no-fund
+
+# App source (server.js, db.js, sse.js, public/, and the sgmodule if present).
+COPY . .
+
 ENV PORT=8080
+ENV HOST=0.0.0.0
 EXPOSE 8080
+
+# DATABASE_URL and ADMIN_PASS (first boot only) come from the environment.
 CMD ["node", "server.js"]

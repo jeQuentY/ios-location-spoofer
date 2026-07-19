@@ -86,55 +86,35 @@ location-spoofer.js                 # Core script (shared by four platforms)
 location-spoofer-qx.js              # Quantumult X-specific
 location-spoofer-config.json        # Config sample
 使用教程.md                         # Step-by-step tutorial (Chinese)
-location-picker/                    # Optional: web map picker (Node or Cloudflare Worker)
-location-picker/worker/             # Cloudflare Worker version (no VPS; supports Loon configUrl)
+location-picker/                    # Multi-user control panel (PostgreSQL + realtime, Docker/Coolify)
 ```
 
-## Optional: web map location picker
+## Multi-user control panel
 
-Change location often and tired of looking up coordinates by hand? The bundled [`location-picker/`](location-picker/) tool lets you tap a map to set your location: altitude is filled in automatically and accuracy is adjustable. Loon / Shadowrocket read it via `configUrl`.
+Change location often, or run this for several people? The bundled
+[`location-picker/`](location-picker/) is a self-hosted, multi-user control panel:
+admins manage users and see every device on a **live map** (spoofed vs real),
+each user manages only their own devices, and every device reads its coordinates
+from **your** panel via `configUrl` — no editing files, no `raw.github`.
 
-**Three deployment options:**
+- Storage: **PostgreSQL** · Realtime: **Server-Sent Events** · Deploy: **Docker → Coolify**
+- Full setup, endpoints and environment variables: **[location-picker/README.md](location-picker/README.md)**
 
-| Option | Directory | Best for |
-|--------|-----------|----------|
-| **Cloudflare Worker — Wrangler CLI** (recommended) | [`location-picker/worker/`](location-picker/worker/) | No VPS, HTTPS included; comfortable with the CLI |
-| **Cloudflare Worker — dashboard** | [`location-picker/cloudflare-webui/`](location-picker/cloudflare-webui/) | No VPS, HTTPS included; no npm/Wrangler — paste a single file |
-| Self-hosted Node | [`location-picker/server.js`](location-picker/server.js) | You have your own VPS / NAS |
+Quick start (local / VPS):
 
-Loon plugin **remote config URL** example:
-
+```bash
+cd location-picker
+ADMIN_PASS=$(openssl rand -hex 12) docker compose up --build
+# → http://localhost:8080   (user "admin", that password)
 ```
-https://your-worker.workers.dev/loc.json?token=YOUR_TOKEN
-```
+
+On the phone, open a device in the panel and use **▦ QR** / **Module URL** to import
+the module into Shadowrocket — its `configUrl` points back at your panel's
+`/loc.json?token=…`, so coordinates stay live.
 
 ## Community
 
 This project welcomes review and feedback from the LINUX DO community: [LINUX DO](https://linux.do)
-
-## location-picker server configuration
-
-`location-picker/server.js` is controlled by environment variables. **If `TOKEN` is not set, the process exits immediately — it will never fall back to a weak default.**
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `TOKEN` | **Yes** | none | Access token. Must match the `token=` in the `configUrl` at the end of the proxy module's `argument=`. Generate one with `openssl rand -hex 24`. |
-| `PORT` | No | `8080` | Listen port; ports below 1024 require root. |
-| `CERT` | No | empty | HTTPS fullchain certificate path; HTTPS is used only when both `CERT` and `KEY` are set. |
-| `KEY` | No | empty | HTTPS private key path; used only when both `CERT` and `KEY` are set. |
-
-Startup examples:
-
-```bash
-# http (simplest — get the flow working before switching to https)
-TOKEN=$(openssl rand -hex 24) PORT=8080 node server.js
-
-# https (reuse acme.sh certs; no restart needed on renewal — the process hot-reloads every 12 hours)
-TOKEN=$(openssl rand -hex 24) PORT=8443 \
-CERT=/root/cert/example.com/fullchain.pem \
-KEY=/root/cert/example.com/privkey.pem \
-node server.js
-```
 
 The data file `loc.json` is written next to `server.js` and records the current coordinates / altitude / accuracy. It is listed in `.gitignore`, so it won't be committed to the repo by accident.
 

@@ -1,2 +1,7 @@
+node_modules/
 loc.json
+data.json
+data.json.tmp
+.env
+.dev.vars
 .DS_Store

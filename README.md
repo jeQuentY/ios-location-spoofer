@@ -88,55 +88,32 @@ location-spoofer.js                 # 核心脚本（四平台共用）
 location-spoofer-qx.js              # QX 专用
 location-spoofer-config.json        # 配置样板
 使用教程.md                         # 小白保姆级图文教程
-location-picker/                    # 进阶（可选）：网页地图选点（Node 或 Cloudflare Worker）
-location-picker/worker/             # Cloudflare Worker 版（免 VPS，支持 Loon configUrl）
+location-picker/                    # 多用户控制面板（PostgreSQL + 实时地图，Docker/Coolify）
 ```
 
-## 进阶：网页地图选点工具
+## 多用户控制面板
 
-经常换定位、懒得手动查坐标改参数？项目自带 [`location-picker/`](location-picker/) 地图选点工具：点地图即定位、海拔自动、精度可调，Loon / Shadowrocket 通过 `configUrl` 读取。
+经常换定位，或者要给多个人用？项目自带 [`location-picker/`](location-picker/) 多用户控制面板：
+管理员管理用户、在**实时地图**上看到每台设备（伪造位置 vs 真实位置），普通用户只看自己的设备；
+每台设备通过 `configUrl` 从**你自己的面板**读取坐标 —— 无需改文件，也不再依赖 `raw.github`。
 
-**三种部署方式：**
+- 存储：**PostgreSQL** · 实时：**Server-Sent Events** · 部署：**Docker → Coolify**
+- 完整部署、接口与环境变量说明见 **[location-picker/README.md](location-picker/README.md)**
 
-| 方式 | 目录 | 适合 |
-|------|------|------|
-| **Cloudflare Worker — Wrangler CLI**（推荐） | [`location-picker/worker/`](location-picker/worker/) | 免 VPS、自带 HTTPS；熟悉命令行 |
-| **Cloudflare Worker — 网页后台** | [`location-picker/cloudflare-webui/`](location-picker/cloudflare-webui/) | 免 VPS、自带 HTTPS；不想装 npm / Wrangler，复制单文件即可 |
-| Node 自托管 | [`location-picker/server.js`](location-picker/server.js) | 有自己的 VPS / NAS |
+快速开始（本地 / VPS）：
 
-Loon 插件 **远程配置 URL** 示例：
-
+```bash
+cd location-picker
+ADMIN_PASS=$(openssl rand -hex 12) docker compose up --build
+# → http://localhost:8080   （账号 "admin"，密码即上面的 ADMIN_PASS）
 ```
-https://你的worker.workers.dev/loc.json?token=你的TOKEN
-```
+
+在手机上：面板里打开某台设备，用 **▦ QR** / **Module URL** 把模块导入 Shadowrocket，
+其 `configUrl` 指向你面板的 `/loc.json?token=…`，坐标即实时生效。
 
 ## 友情链接
 
 本项目接受 LINUX DO 社区佬友监督与反馈：[LINUX DO](https://linux.do)
-
-## location-picker 服务端配置
-
-`location-picker/server.js` 通过环境变量控制，**`TOKEN` 不设进程会直接退出，不会用弱口令兜底**。
-
-| 变量 | 是否必设 | 默认值 | 说明 |
-|------|---------|--------|------|
-| `TOKEN` | **必设** | 无 | 访问口令和 Shadowrocket 模块 `argument=` 末尾的 `configUrl` 里的 `token=` 必须一致。建议 `openssl rand -hex 24` 生成 |
-| `PORT` | 否 | `8080` | 监听端口；1024 以下需 root |
-| `CERT` | 否 | 空 | HTTPS 证书 fullchain 路径；与 `KEY` 同时设置才走 https |
-| `KEY` | 否 | 空 | HTTPS 私钥路径；与 `CERT` 同时设置才走 https |
-
-启动示例：
-
-```bash
-# http（最简，先跑通流程再用 https）
-TOKEN=$(openssl rand -hex 24) PORT=8080 node server.js
-
-# https（复用 acme.sh 证书；续期无需重启，进程每 12 小时自动热加载）
-TOKEN=$(openssl rand -hex 24) PORT=8443 \
-CERT=/root/cert/example.com/fullchain.pem \
-KEY=/root/cert/example.com/privkey.pem \
-node server.js
-```
 
 数据文件 `loc.json` 自动落在 `server.js` 同目录，记录当前坐标 / 海拔 / 精度；已在 `.gitignore` 中忽略，不会被误提交进仓库。
 

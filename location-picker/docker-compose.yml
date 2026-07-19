@@ -1,0 +1,41 @@
+# Local / self-hosted stack: control panel + PostgreSQL.
+#
+# On Coolify you normally add a Postgres service in the UI and set DATABASE_URL
+# on the app — this compose file is for local testing and simple VPS deploys.
+#
+#   ADMIN_PASS=$(openssl rand -hex 12) docker compose up --build
+#   -> open http://localhost:8080  (user "admin", that password)
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: panel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-panel_dev_pw}
+      POSTGRES_DB: panel
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panel -d panel"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  panel:
+    build:
+      context: .
+      dockerfile: dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://panel:${POSTGRES_PASSWORD:-panel_dev_pw}@db:5432/panel
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASS: ${ADMIN_PASS:-}
+      PORT: 8080
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
