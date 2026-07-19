@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS devices (
   real_acc    DOUBLE PRECISION,
   real_src    TEXT,
   real_diag   TEXT,
+  wd_ts       BIGINT,
+  wd_dist     DOUBLE PRECISION,
+  wd_ok       BOOLEAN,
   last_seen   BIGINT,
   last_report BIGINT,
   created_at  BIGINT NOT NULL
@@ -91,6 +94,9 @@ const MIGRATIONS = [
   "ALTER TABLE devices ADD COLUMN IF NOT EXISTS real_acc DOUBLE PRECISION",
   "ALTER TABLE devices ADD COLUMN IF NOT EXISTS real_src TEXT",
   "ALTER TABLE devices ADD COLUMN IF NOT EXISTS real_diag TEXT",
+  "ALTER TABLE devices ADD COLUMN IF NOT EXISTS wd_ts BIGINT",
+  "ALTER TABLE devices ADD COLUMN IF NOT EXISTS wd_dist DOUBLE PRECISION",
+  "ALTER TABLE devices ADD COLUMN IF NOT EXISTS wd_ok BOOLEAN",
   "ALTER TABLE position_reports ADD COLUMN IF NOT EXISTS acc INTEGER",
   "ALTER TABLE position_reports ADD COLUMN IF NOT EXISTS src TEXT",
 ];
@@ -173,6 +179,16 @@ function rowToDevice(r) {
             source: r.real_src || null,
             diag: safeJson(r.real_diag),
             ts: r.real_ts != null ? Number(r.real_ts) : null,
+          }
+        : null,
+    // Spoof-integrity watchdog: the on-phone check comparing the fused location
+    // (what apps see) against the spoof point. ok=false means the spoof leaked.
+    watchdog:
+      r.wd_ts != null
+        ? {
+            ok: r.wd_ok === true,
+            distanceKm: r.wd_dist != null ? Number(r.wd_dist) : null,
+            ts: Number(r.wd_ts),
           }
         : null,
     lastSeen: r.last_seen != null ? Number(r.last_seen) : null,
@@ -374,6 +390,14 @@ async function recordReal(id, la, lo, alt, ts, acc, src, diag) {
   const r = await q("UPDATE devices SET last_seen=$2 WHERE id=$1 RETURNING *", [id, ts]);
   return rowToDevice(r.rows[0]);
 }
+async function recordWatchdog(id, ok, distKm, ts) {
+  const d = Number.isFinite(Number(distKm)) ? Number(distKm) : null;
+  const r = await q(
+    "UPDATE devices SET wd_ok=$2, wd_dist=$3, wd_ts=$4, last_seen=$4 WHERE id=$1 RETURNING *",
+    [id, !!ok, d, ts],
+  );
+  return rowToDevice(r.rows[0]);
+}
 async function touchLastSeen(id, ts) {
   await q("UPDATE devices SET last_seen=$2 WHERE id=$1", [id, ts]);
 }
@@ -512,6 +536,8 @@ module.exports = {
   setDeviceToken,
   setReportReal,
   recordReal,
+  recordWatchdog,
+  haversineKm,
   touchLastSeen,
   deleteDevice,
   deviceHistory,

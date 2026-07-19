@@ -98,6 +98,8 @@
   .badge.spoof{color:var(--spoof);background:color-mix(in srgb,var(--spoof) 15%,transparent)}
   .badge.realgps{color:var(--warn);background:color-mix(in srgb,var(--warn) 15%,transparent)}
   .badge.report{color:var(--real);background:color-mix(in srgb,var(--real) 16%,transparent)}
+  .badge.wdok{color:var(--spoof);background:color-mix(in srgb,var(--spoof) 15%,transparent)}
+  .badge.wdleak{color:var(--danger);background:color-mix(in srgb,var(--danger) 18%,transparent)}
   .card .r2{display:flex;gap:14px;margin-top:8px;font-size:12px;color:var(--muted);flex-wrap:wrap}
   .card .r2 .k{color:var(--faint)}
 
@@ -440,7 +442,8 @@ function renderList(){
       '<div class="r1"><span class="dot '+(online(d)?"on":"")+'"></span>'+
         '<span class="name">'+esc(d.name)+'</span>'+ownerTag+
         '<span class="badge '+(d.enabled?"spoof":"realgps")+'">'+(d.enabled?"spoof":"real GPS")+'</span>'+
-        (d.reportReal?'<span class="badge report">reporting</span>':'')+'</div>'+
+        (d.reportReal?'<span class="badge report">reporting</span>':'')+
+        (d.watchdog?(d.watchdog.ok?'<span class="badge wdok" title="spoof holding as of '+ago(d.watchdog.ts)+'">guarded</span>':'<span class="badge wdleak" title="'+ago(d.watchdog.ts)+'">leak '+fmtDist(d.watchdog.distanceKm*1000)+'</span>'):'')+'</div>'+
       '<div class="r2"><span><span class="k">seen</span> '+ago(d.lastSeen)+'</span>'+
         (rl?'<span><span class="k">real→spoof</span> '+fmtDist(dist)+'</span>':'<span class="k">real: not reported</span>')+'</div>'+
       '</div>';
@@ -587,6 +590,7 @@ function renderDetail(d){
       '</span></div>'+
       '<div class="switch'+(d.reportReal?' on':'')+'" id="dt_report"></div>'+
     '</div>'+
+    '<div class="minis" style="margin-bottom:8px"><button id="dt_watchdog">🛡 Install spoof watchdog</button></div>'+
     '<div class="minis"><button id="dt_regen">Regenerate token</button><button class="danger" id="dt_delete">Delete device</button></div>';
 
   $("dt_back").addEventListener("click",function(){SEL=null;renderList();drawMap();closeDetail();$("sidebar").classList.remove("expanded");});
@@ -617,6 +621,7 @@ function renderDetail(d){
     api("POST","/api/devices/"+d.id+"/token",null).then(function(r){if(r.ok){toast("New token generated");openModuleModal(d.id);}});});
   $("dt_delete").addEventListener("click",function(){if(confirm("Delete this device?"))
     api("DELETE","/api/devices/"+d.id,null).then(function(){toast("Deleted");});});
+  $("dt_watchdog").addEventListener("click",function(){openWatchdogModal(d.id);});
   $("dt_report").addEventListener("click",function(){
     var on=!d.reportReal;
     if(on&&!confirm("Turn ON real-location reporting? The device's actual GPS will be sent to this panel and shown to administrators. The owner sees a notice while it is on."))return;
@@ -676,6 +681,33 @@ function openModuleModal(id){
     $("modal").classList.add("show");
     $("mCopy").addEventListener("click",function(){copyText(url,"Module URL copied");});
     $("mClose").addEventListener("click",closeModal);
+  });
+}
+// Guided builder for the on-phone "spoof watchdog" Shortcut. iOS blocks one-tap
+// install of custom (untrusted) shortcuts, so we hand the user the exact URL +
+// 3 steps. The Shortcut sends the phone's CURRENT fused location to /watchdog,
+// which compares it to the spoof point and returns a verdict to show as a notice.
+function openWatchdogModal(id){
+  revealToken(id).then(function(tok){
+    if(!tok)return;
+    var base=location.origin+"/watchdog?token="+tok;
+    var box=$("modalBox");
+    box.innerHTML=
+      '<h3>🛡 Spoof watchdog</h3>'+
+      '<p style="text-align:left">A tiny iOS <b>Shortcut</b> that checks whether the spoof is still holding and notifies you if your real location leaks. iOS won’t let a button install a custom shortcut, so build it once (~1 min):</p>'+
+      '<div class="urlbox" id="wdUrl">'+esc(base)+'</div>'+
+      '<ol style="text-align:left;font-size:12.5px;line-height:1.6;color:var(--muted);margin:0 0 14px;padding-left:18px">'+
+        '<li>Open <b>Shortcuts</b> → <b>＋</b> new shortcut.</li>'+
+        '<li>Add action <b>Get Current Location</b>.</li>'+
+        '<li>Add <b>Get Contents of URL</b>. Paste the URL above, then at the end type <code>&amp;lat=</code> and insert <b>Current Location → Latitude</b>, then <code>&amp;lng=</code> and insert <b>Current Location → Longitude</b>.</li>'+
+        '<li>Add <b>Show Notification</b> → insert the <b>Contents of URL</b> variable.</li>'+
+        '<li>Name it, Done. Run it anytime — or add an <b>Automation</b> (e.g. on unlock / hourly) to auto-check.</li>'+
+      '</ol>'+
+      '<p style="text-align:left;font-size:11.5px;color:var(--faint)">The result also shows here as a <b>guarded / leak</b> badge on the device.</p>'+
+      '<div class="mbtns"><button id="wdCopy" class="pri">Copy URL</button><button id="wdClose">Close</button></div>';
+    $("modal").classList.add("show");
+    $("wdCopy").addEventListener("click",function(){copyText(base,"Watchdog URL copied");});
+    $("wdClose").addEventListener("click",closeModal);
   });
 }
 function closeModal(){$("modal").classList.remove("show");}

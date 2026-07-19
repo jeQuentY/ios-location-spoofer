@@ -124,6 +124,13 @@ function json(res, code, obj, headers) {
   res.writeHead(code, h);
   res.end(JSON.stringify(obj));
 }
+function textPlain(res, code, s) {
+  res.writeHead(code, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
+  res.end(String(s));
+}
 function readJson(req) {
   return new Promise(function (resolve) {
     let b = "";
@@ -195,6 +202,7 @@ function deviceView(d) {
     reportReal: d.reportReal === true,
     spoofed: d.spoofed,
     real: d.real || null,
+    watchdog: d.watchdog || null,
     lastSeen: d.lastSeen || null,
     lastReport: d.lastReport || null,
     createdAt: d.createdAt,
@@ -337,6 +345,39 @@ async function route(req, res) {
     );
     sse.deviceChanged(deviceView(updated));
     return json(res, 200, { ok: true });
+  }
+  // Spoof-integrity watchdog. The on-phone Shortcut sends the device's CURRENT
+  // fused location (what apps actually see); we compare it to the spoof point and
+  // return a plain-text verdict the Shortcut shows as a notification. Also records
+  // the status so the admin dashboard flags a leak.
+  if (p === "/watchdog" && (m === "GET" || m === "POST")) {
+    const d = await db.getDeviceByToken(url.searchParams.get("token"));
+    if (!d) return textPlain(res, 403, "bad token");
+    let la, lo;
+    if (m === "POST") {
+      const j = await readJson(req);
+      la = Number(j && j.lat);
+      lo = Number(j && j.lng);
+    } else {
+      la = Number(url.searchParams.get("lat"));
+      lo = Number(url.searchParams.get("lng"));
+    }
+    if (!validCoords(la, lo)) return textPlain(res, 400, "⚠️ Watchdog: bad coordinates");
+    const sp = d.spoofed || {};
+    if (d.enabled === false)
+      return textPlain(res, 200, "ℹ️ Spoofing is OFF for “" + d.name + "” — nothing to check.");
+    if (sp.latitude == null)
+      return textPlain(res, 200, "ℹ️ No spoof location set for “" + d.name + "”.");
+    const dist = db.haversineKm(la, lo, sp.latitude, sp.longitude);
+    const ok = dist <= 1; // within 1 km of the spoof point = holding
+    const updated = await db.recordWatchdog(d.id, ok, dist, Date.now());
+    sse.deviceChanged(deviceView(updated));
+    const msg = ok
+      ? "✅ Spoof holding — you appear at the spoof (" + dist.toFixed(dist < 10 ? 2 : 0) + " km)."
+      : "⚠️ SPOOF LEAK — you are " +
+        dist.toFixed(dist < 10 ? 1 : 0) +
+        " km from the spoof. Real location is showing.";
+    return textPlain(res, 200, msg);
   }
   if (p === "/module.sgmodule" && m === "GET") {
     const tok = url.searchParams.get("token");
