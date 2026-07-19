@@ -31,7 +31,12 @@
     // This is DISCLOSED telemetry: it can only be turned on by the server (remote
     // config), never silently from module arguments, so the panel's "reporting real
     // location" indicator always reflects it. Default off.
-    reportReal: false
+    reportReal: false,
+    // Cell-tower geolocation is coarse (Apple returns the tower's registered
+    // location — often a regional centre, hundreds of km off). By default we only
+    // report a REAL fix derived from WiFi APs, which is accurate to tens of metres.
+    // Set reportCell=true to also report cell-only fixes (with a large accuracy).
+    reportCell: false
   };
 
   // Prefix prepended to a SPOOFED (synthesized) response. Mirrors the original Go
@@ -639,6 +644,8 @@
     }
     // Only the server (remote config) can enable real-location reporting.
     cfg.reportReal = parseBoolean(cfg.reportReal, false);
+    // Accuracy switch (not privacy-sensitive): allow coarse cell-only real fixes.
+    cfg.reportCell = parseBoolean(cfg.reportCell, false);
 
     if (!Number.isFinite(cfg.latitude) || cfg.latitude < -90 || cfg.latitude > 90) {
       throw new Error("invalid latitude");
@@ -1328,6 +1335,7 @@
   function configFromArgs(args) {
     var cfg = {};
     var scalarKeys = [
+      "reportCell",
       "enabled",
       "mode",
       "latitude",
@@ -1599,6 +1607,10 @@
     }
     headers["Content-Type"] = "application/octet-stream";
     headers["Content-Length"] = String(length);
+    // Never let iOS cache a spoofed response and replay it as if it were a fresh
+    // real one — that replay is what makes the reported "real" location collapse
+    // onto the spoofed point (see the contamination guard in continueResponseRewrite).
+    headers["Cache-Control"] = "no-store";
     return headers;
   }
 
@@ -2005,11 +2017,35 @@
     // Disclosed telemetry: only runs when the panel turned reportReal on (server
     // remote config). Fire before $done as best-effort background delivery.
     if (config.reportReal) {
-      reportRealLocation(
-        deriveReportUrl(config.configUrl),
-        estimateRealLocation(responseResult.originalPayload),
-        config.debug
-      );
+      var realEst = estimateRealLocation(responseResult.originalPayload);
+      // Contamination guard: if the "real" estimate sits on top of the spoofed
+      // target, it is not an independent fix — it is our own patched response
+      // being read back (all APs collapsed to the spoof point). Drop it so the
+      // panel keeps the last genuine real fix instead of jumping onto the spoof.
+      if (
+        realEst &&
+        haversineMeters(realEst.lat, realEst.lng, config.latitude, config.longitude) < 50
+      ) {
+        if (config.debug) {
+          console.log(
+            "Location spoofer real report skipped: estimate matches spoofed target (contamination guard)"
+          );
+        }
+        realEst = null;
+      }
+      // Cell-only fixes are coarse (regional-centre errors of hundreds of km).
+      // Skip them unless explicitly allowed, so the panel shows "not reported"
+      // instead of a wildly wrong point.
+      if (realEst && realEst.source === "cell" && !config.reportCell) {
+        if (config.debug) {
+          console.log(
+            "Location spoofer real report skipped: cell-only estimate is too coarse " +
+              "(no WiFi in Apple's response; set reportCell=true to allow it anyway)"
+          );
+        }
+        realEst = null;
+      }
+      reportRealLocation(deriveReportUrl(config.configUrl), realEst, config.debug);
     }
     doneRewriteResponse(responseResult.response, {
       wifiCount: responseResult.wifiCount,
