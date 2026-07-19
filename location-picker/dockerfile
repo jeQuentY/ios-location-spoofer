@@ -1,7 +1,13 @@
+# Build context is THIS directory (location-picker/) — Coolify runs
+#   docker build -f location-picker/dockerfile  <...>  location-picker
+# so every COPY path is relative to location-picker/. The repo-root
+# ios-location-spoofer.sgmodule is OUTSIDE this context and cannot be copied;
+# server.js ships an identical embedded copy of the module and uses it as the
+# fallback for "Copy module" / the Shadowrocket import link, so this is fine.
 FROM node:20-alpine
 WORKDIR /app
 COPY server.js .
-# loc.json gets written here at runtime
+# data.json (devices/users) is written here at runtime — mount a volume to persist.
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "server.js"]

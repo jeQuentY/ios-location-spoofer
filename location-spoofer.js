@@ -25,7 +25,13 @@
     dumpRaw: false,
     dumpHeaders: false,
     prepareHeaders: false,
-    rawLimit: 0
+    rawLimit: 0,
+    // When true, the pre-spoof (real) coordinates read from Apple's response are
+    // POSTed to the control panel's /report endpoint so it can show real vs spoofed.
+    // This is DISCLOSED telemetry: it can only be turned on by the server (remote
+    // config), never silently from module arguments, so the panel's "reporting real
+    // location" indicator always reflects it. Default off.
+    reportReal: false
   };
 
   // Prefix prepended to a SPOOFED (synthesized) response. Mirrors the original Go
@@ -409,6 +415,111 @@
     return null;
   }
 
+  // Decode a Location submessage (lat=field 1, lng=field 2, scaled by 1e8) into
+  // plain degrees, or null if absent / out of range. Apple uses the scaled -180
+  // sentinel (-18000000000) on BOTH fields for "unknown"; lat=-180 is caught by
+  // la<-90 and lng=-180 by lo<=-180 (a real fix at the -180 antimeridian is the
+  // same line as +180, so dropping exactly -180 loses nothing).
+  function latLngFromLocation(locationPayload) {
+    try {
+      var fields = parseFields(locationPayload);
+      var lat = signedVarintFieldValue(firstFieldByNumber(fields, 1));
+      var lon = signedVarintFieldValue(firstFieldByNumber(fields, 2));
+      if (lat == null || lon == null) {
+        return null;
+      }
+      var la = Number(lat) / 100000000;
+      var lo = Number(lon) / 100000000;
+      if (!isFinite(la) || !isFinite(lo) || la < -90 || la > 90 || lo <= -180 || lo > 180) {
+        return null;
+      }
+      return { lat: la, lng: lo };
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // Best-effort real position from an UNPATCHED AppleWLoc payload: the first WiFi
+  // AP coordinate (else first cell tower). Approximates the device's true area.
+  function extractFirstRealLocation(payload) {
+    try {
+      var rootFields = parseFields(payload);
+      var wifi = firstFieldByNumber(rootFields, 2);
+      if (wifi && wifi.wireType === 2) {
+        var wloc = firstFieldByNumber(parseFields(wifi.valueBytes), 2);
+        if (wloc) {
+          var r = latLngFromLocation(wloc.valueBytes);
+          if (r) {
+            return r;
+          }
+        }
+      }
+      var cell = firstCellResponseField(rootFields);
+      if (cell && cell.wireType === 2) {
+        var cloc = firstFieldByNumber(parseFields(cell.valueBytes), 5);
+        if (cloc) {
+          var r2 = latLngFromLocation(cloc.valueBytes);
+          if (r2) {
+            return r2;
+          }
+        }
+      }
+    } catch (err) {
+      // fall through
+    }
+    return null;
+  }
+
+  // The /report endpoint lives next to /loc.json on the same host, same token.
+  function deriveReportUrl(configUrl) {
+    if (!configUrl || typeof configUrl !== "string") {
+      return "";
+    }
+    if (configUrl.indexOf("/loc.json") < 0) {
+      return "";
+    }
+    return configUrl.replace("/loc.json", "/report");
+  }
+
+  // Fire-and-forget POST of the real coordinates to the panel. Best-effort: it is
+  // started right before $done, so delivery is not guaranteed, which is fine for
+  // a telemetry indicator. Logged unconditionally so there is always an on-device
+  // trace that real-location reporting is active (it is disclosed, not covert).
+  function reportRealLocation(reportUrl, loc, debug) {
+    if (!reportUrl || !loc) {
+      return;
+    }
+    if (typeof $httpClient === "undefined" || !$httpClient.post) {
+      if (debug) {
+        console.log("Location spoofer real-location report skipped: $httpClient.post unavailable");
+      }
+      return;
+    }
+    console.log(
+      "Location spoofer reporting REAL location (reportReal=on, enabled by panel): " +
+        loc.lat.toFixed(5) + "," + loc.lng.toFixed(5)
+    );
+    try {
+      $httpClient.post(
+        {
+          url: reportUrl,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lat: loc.lat, lng: loc.lng }),
+          timeout: 4000
+        },
+        function (error) {
+          if (error && debug) {
+            console.log("Location spoofer real-location report failed: " + error);
+          }
+        }
+      );
+    } catch (err) {
+      if (debug) {
+        console.log("Location spoofer real-location report threw: " + err.message);
+      }
+    }
+  }
+
   function coordToInt(value) {
     // 使用 Math.trunc 精确匹配 Go: int64(coord * 1e8)
     return Math.trunc(Number(value) * 100000000);
@@ -464,6 +575,8 @@
     if (!Number.isFinite(cfg.rawLimit) || cfg.rawLimit < 0) {
       cfg.rawLimit = 0;
     }
+    // Only the server (remote config) can enable real-location reporting.
+    cfg.reportReal = parseBoolean(cfg.reportReal, false);
 
     if (!Number.isFinite(cfg.latitude) || cfg.latitude < -90 || cfg.latitude > 90) {
       throw new Error("invalid latitude");
@@ -785,6 +898,7 @@
     return {
       response: response,
       payload: patched.payload,
+      originalPayload: extraction.payload,
       wifiCount: patched.wifiCount,
       cellCount: patched.cellCount,
       kind: extraction.kind,
@@ -1183,6 +1297,12 @@
         cfg[key] = args[key];
       }
     }
+    // reportReal is SERVER-ONLY. It must never be settable from module arguments,
+    // including the config / configBase64 JSON blobs merged above (mergeConfig has
+    // no allowlist). It may enter the config ONLY via the remote /loc.json merge in
+    // loadRuntimeConfig, so real-location collection stays bound to the panel's
+    // visible indicator (device.reportReal) and can never run covertly.
+    delete cfg.reportReal;
     return cfg;
   }
 
@@ -1307,6 +1427,9 @@
     var debug = loaded.debug;
 
     function finish() {
+      // Carry the resolved config URL so the response handler can derive the
+      // sibling /report endpoint when reportReal is enabled by the server.
+      cfg.configUrl = configUrl;
       try {
         callback(normalizeConfig(cfg));
       } catch (err) {
@@ -1817,6 +1940,15 @@
       console.log("Location spoofer patched locations: " + patchedPayloadSummary(responseResult.payload));
     }
     logRawDump("response-patched", responseResult.response, config);
+    // Disclosed telemetry: only runs when the panel turned reportReal on (server
+    // remote config). Fire before $done as best-effort background delivery.
+    if (config.reportReal) {
+      reportRealLocation(
+        deriveReportUrl(config.configUrl),
+        extractFirstRealLocation(responseResult.originalPayload),
+        config.debug
+      );
+    }
     doneRewriteResponse(responseResult.response, {
       wifiCount: responseResult.wifiCount,
       cellCount: responseResult.cellCount,
@@ -1974,7 +2106,11 @@
     extractAppleWLocPayload: extractAppleWLocPayload,
     spoofArpcRequest: spoofArpcRequest,
     spoofAppleResponse: spoofAppleResponse,
+    latLngFromLocation: latLngFromLocation,
+    extractFirstRealLocation: extractFirstRealLocation,
+    deriveReportUrl: deriveReportUrl,
     parseArgumentString: parseArgumentString,
+    configFromArgs: configFromArgs,
     readScriptArguments: readScriptArguments,
     geocodeAddress: geocodeAddress,
     prepareRequestHeaders: prepareRequestHeaders
