@@ -1635,10 +1635,12 @@
     }
     headers["Content-Type"] = "application/octet-stream";
     headers["Content-Length"] = String(length);
-    // Never let iOS cache a spoofed response and replay it as if it were a fresh
-    // real one — that replay is what makes the reported "real" location collapse
-    // onto the spoofed point (see the contamination guard in continueResponseRewrite).
-    headers["Cache-Control"] = "no-store";
+    // NOTE: we deliberately DO NOT force Cache-Control: no-store here. Forcing it
+    // stops iOS caching the spoofed fix, so it re-queries constantly and the real
+    // location leaks in between updates ("teleports home"). Letting the spoofed
+    // response keep Apple's original caching makes the spoof stick. The reporting
+    // contamination this once guarded against is already handled by the
+    // contamination guard (script) + the jump filter (panel).
     return headers;
   }
 
