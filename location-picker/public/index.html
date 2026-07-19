@@ -72,6 +72,7 @@
   .maplegend .lg{width:12px;height:12px;border-radius:50%;flex:none}
   .maplegend .lg.spoof{background:#34d399}
   .maplegend .lg.real{background:#38bdf8}
+  .maplegend .lg.ap{background:#fbbf24}
   .maplegend .lg.ring{background:transparent;border:2px solid #38bdf8;opacity:.5}
   .maplegend .lg.line{width:16px;height:0;border-radius:0;border-top:2px dashed #93a1b4}
   .sidebar{width:380px;max-width:42vw;border-left:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;min-height:0}
@@ -122,6 +123,10 @@
   .ro .val{font-family:var(--mono);font-size:13px;margin-top:3px}
   .ro.s .val{color:var(--spoof)} .ro.r .val{color:var(--real)}
   .ro .sub{font-size:11px;color:var(--muted);margin-top:2px}
+  .diagbox{display:flex;align-items:center;gap:10px;margin-bottom:11px;padding:9px 11px;border:1px solid color-mix(in srgb,var(--warn) 40%,var(--border));border-radius:11px;background:color-mix(in srgb,var(--warn) 9%,var(--surface-2))}
+  .diagbox .dg-t{flex:1;font-size:11.5px;color:var(--muted);line-height:1.45}
+  .diagbox .dg-t b{color:var(--text)}
+  .diagbox button{flex:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 11px;font-size:12px;font-weight:650}
 
   .params{display:flex;gap:8px;margin-bottom:11px}
   .params label{flex:1;display:flex;flex-direction:column;gap:5px;font-size:9.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.04em;font-weight:700}
@@ -458,6 +463,7 @@ function initMap(){
     d.innerHTML='<div><span class="lg spoof"></span>Spoofed</div>'+
       '<div><span class="lg real"></span>Real (WiFi/cell)</div>'+
       '<div><span class="lg ring"></span>real accuracy</div>'+
+      '<div><span class="lg ap"></span>Apple AP refs (selected)</div>'+
       '<div><span class="lg line"></span>offset</div>';
     L.DomEvent.disableClickPropagation(d);
     return d;
@@ -490,6 +496,14 @@ function drawMap(){
   DEVICES.forEach(function(d){
     if(layers[d.id])map.removeLayer(layers[d.id]);
     var g=L.layerGroup(),sp=d.spoofed,rl=d.real,sel=(d.id===SEL);
+    // Reference APs Apple returned for the SELECTED device (amber dots). Makes it
+    // obvious when they all cluster in the wrong place (a bad Apple DB entry).
+    if(sel&&rl&&rl.diag&&rl.diag.points&&rl.diag.points.length){
+      rl.diag.points.forEach(function(p){
+        L.circleMarker([p[0],p[1]],{radius:3,color:"#fbbf24",fillColor:"#fbbf24",fillOpacity:.65,weight:1})
+          .bindTooltip("Apple WiFi AP ref: "+p[0].toFixed(5)+", "+p[1].toFixed(5),{direction:"top"}).addTo(g);
+      });
+    }
     // offset line first so markers sit on top
     if(sp&&sp.latitude!=null&&rl){
       L.polyline([[rl.latitude,rl.longitude],[sp.latitude,sp.longitude]],{color:"#93a1b4",weight:1.5,dashArray:"4 5",opacity:.7}).addTo(g);
@@ -552,6 +566,9 @@ function renderDetail(d){
         '<div class="val" id="dt_rlval">'+(rl?rl.latitude.toFixed(5)+", "+rl.longitude.toFixed(5):"not reported")+'</div>'+
         '<div class="sub" id="dt_rlsub">'+realSubText(rl)+'</div></div>'+
     '</div>'+
+    ((rl&&rl.diag&&rl.diag.points&&rl.diag.points.length)?
+      '<div class="diagbox"><span class="dg-t"><b>'+rl.diag.points.length+' Apple '+((rl.diag.source||"wifi").toUpperCase())+' AP refs</b> — the amber dots on the map. If they sit far from where the device really is, Apple’s WiFi database is wrong for those APs (not fixable by us).</span>'+
+        '<button id="dt_fitaps">Zoom to APs</button></div>':'')+
     '<div class="params">'+
       '<label>Alt (m)<input id="dt_alt" type="number" inputmode="numeric" value="'+(sp.altitude!=null?sp.altitude:"")+'"></label>'+
       '<label>H ±m<input id="dt_hacc" type="number" inputmode="numeric" value="'+(sp.horizontalAccuracy!=null?sp.horizontalAccuracy:39)+'"></label>'+
@@ -575,6 +592,11 @@ function renderDetail(d){
   $("dt_back").addEventListener("click",function(){SEL=null;renderList();drawMap();closeDetail();$("sidebar").classList.remove("expanded");});
   $("dt_name").addEventListener("change",function(){api("POST","/api/devices/"+d.id+"/rename",{name:$("dt_name").value});});
   $("dt_search").addEventListener("click",function(){searchPlace($("dt_q").value);});
+  if($("dt_fitaps"))$("dt_fitaps").addEventListener("click",function(){
+    if(rl&&rl.diag&&rl.diag.points&&rl.diag.points.length){
+      map.fitBounds(rl.diag.points.map(function(p){return [p[0],p[1]];}),{padding:[60,60],maxZoom:17});
+    }
+  });
   $("dt_q").addEventListener("keydown",function(e){if(e.key==="Enter")searchPlace($("dt_q").value);});
   if(PENDING){showPending(PENDING.lat,PENDING.lng);var sv0=$("dt_spval");if(sv0)sv0.textContent=PENDING.lat.toFixed(5)+", "+PENDING.lng.toFixed(5)+" (unsaved)";}
   $("dt_save").addEventListener("click",function(){

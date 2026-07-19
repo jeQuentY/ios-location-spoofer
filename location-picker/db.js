@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS devices (
   real_ts     BIGINT,
   real_acc    DOUBLE PRECISION,
   real_src    TEXT,
+  real_diag   TEXT,
   last_seen   BIGINT,
   last_report BIGINT,
   created_at  BIGINT NOT NULL
@@ -89,9 +90,60 @@ CREATE INDEX IF NOT EXISTS idx_reports_device_ts ON position_reports(device_id, 
 const MIGRATIONS = [
   "ALTER TABLE devices ADD COLUMN IF NOT EXISTS real_acc DOUBLE PRECISION",
   "ALTER TABLE devices ADD COLUMN IF NOT EXISTS real_src TEXT",
+  "ALTER TABLE devices ADD COLUMN IF NOT EXISTS real_diag TEXT",
   "ALTER TABLE position_reports ADD COLUMN IF NOT EXISTS acc INTEGER",
   "ALTER TABLE position_reports ADD COLUMN IF NOT EXISTS src TEXT",
 ];
+
+// ---------- helpers ----------
+function safeJson(s) {
+  try {
+    return s ? JSON.parse(s) : null;
+  } catch (e) {
+    return null;
+  }
+}
+function haversineKm(aLat, aLng, bLat, bLng) {
+  const R = 6371,
+    toR = Math.PI / 180;
+  const dLat = (bLat - aLat) * toR,
+    dLng = (bLng - aLng) * toR;
+  const s =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(aLat * toR) * Math.cos(bLat * toR) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+// Sanitise the diagnostics blob the device sends (reference AP points, capped).
+function clampDiag(diag) {
+  if (!diag || typeof diag !== "object") return null;
+  const out = {
+    source: diag.source === "wifi" || diag.source === "cell" ? diag.source : null,
+    count: Number.isFinite(Number(diag.count)) ? Math.round(Number(diag.count)) : null,
+    accuracy: Number.isFinite(Number(diag.accuracy)) ? Math.round(Number(diag.accuracy)) : null,
+    points: [],
+  };
+  if (Array.isArray(diag.points)) {
+    for (let i = 0; i < diag.points.length && out.points.length < 80; i++) {
+      const p = diag.points[i];
+      if (
+        Array.isArray(p) &&
+        p.length >= 2 &&
+        isFinite(p[0]) &&
+        isFinite(p[1]) &&
+        Math.abs(p[0]) <= 90 &&
+        Math.abs(p[1]) <= 180
+      ) {
+        out.points.push([Math.round(p[0] * 1e5) / 1e5, Math.round(p[1] * 1e5) / 1e5]);
+      }
+    }
+  }
+  return out;
+}
+
+// A far jump from the current displayed real is treated as a transient glitch
+// (a bad Apple AP entry) and does NOT move the marker — unless the previous raw
+// report was already near the new spot, i.e. a real sustained move.
+const JUMP_KM = 30;
 
 // ---------- row mapping ----------
 // Map a devices row to the object shape the HTTP layer and frontend expect.
@@ -119,6 +171,7 @@ function rowToDevice(r) {
             altitude: r.real_alt != null ? r.real_alt : undefined,
             accuracy: r.real_acc != null ? Number(r.real_acc) : null,
             source: r.real_src || null,
+            diag: safeJson(r.real_diag),
             ts: r.real_ts != null ? Number(r.real_ts) : null,
           }
         : null,
@@ -267,27 +320,58 @@ async function setReportReal(id, on) {
   }
   const r = await q(
     `UPDATE devices SET report_real=FALSE, real_lat=NULL, real_lng=NULL,
-        real_alt=NULL, real_ts=NULL, last_report=NULL WHERE id=$1 RETURNING *`,
+        real_alt=NULL, real_ts=NULL, real_acc=NULL, real_src=NULL, real_diag=NULL,
+        last_report=NULL WHERE id=$1 RETURNING *`,
     [id],
   );
   await q("DELETE FROM position_reports WHERE device_id=$1", [id]);
   return rowToDevice(r.rows[0]);
 }
-async function recordReal(id, la, lo, alt, ts, acc, src) {
+async function recordReal(id, la, lo, alt, ts, acc, src, diag) {
   const altInt = Number.isFinite(Number(alt)) ? Math.round(Number(alt)) : null;
   const accInt =
     Number.isFinite(Number(acc)) && Number(acc) >= 0 ? Math.round(Number(acc)) : null;
   const source = src === "wifi" || src === "cell" ? src : null;
-  const r = await q(
-    `UPDATE devices SET real_lat=$2, real_lng=$3, real_alt=$4,
-        real_ts=$5, real_acc=$6, real_src=$7, last_report=$5, last_seen=$5
-       WHERE id=$1 RETURNING *`,
-    [id, la, lo, altInt, ts, accInt, source],
-  );
+  const clean = clampDiag(diag);
+  const diagJson = clean ? JSON.stringify(clean) : null;
+
+  // Current displayed real + the most recent raw report (before inserting this one).
+  const curRow = (await q("SELECT real_lat, real_lng FROM devices WHERE id=$1", [id]))
+    .rows[0];
+  const prevRow = (
+    await q(
+      "SELECT lat, lng FROM position_reports WHERE device_id=$1 ORDER BY ts DESC LIMIT 1",
+      [id],
+    )
+  ).rows[0];
+
+  // Always keep the raw report for history / diagnostics.
   await q(
     "INSERT INTO position_reports(device_id, lat, lng, alt, acc, src, ts) VALUES($1,$2,$3,$4,$5,$6,$7)",
     [id, la, lo, altInt, accInt, source, ts],
   );
+
+  // Stability filter: reject a lone far jump from the current real; accept it only
+  // if the previous raw report was already near this new spot (a sustained move).
+  let accept = true;
+  if (curRow && curRow.real_lat != null) {
+    const jump = haversineKm(la, lo, curRow.real_lat, curRow.real_lng);
+    if (jump > JUMP_KM) {
+      accept = !!prevRow && haversineKm(la, lo, prevRow.lat, prevRow.lng) < JUMP_KM;
+    }
+  }
+
+  if (accept) {
+    const r = await q(
+      `UPDATE devices SET real_lat=$2, real_lng=$3, real_alt=$4, real_ts=$5,
+          real_acc=$6, real_src=$7, real_diag=$8, last_report=$5, last_seen=$5
+         WHERE id=$1 RETURNING *`,
+      [id, la, lo, altInt, ts, accInt, source, diagJson],
+    );
+    return rowToDevice(r.rows[0]);
+  }
+  // Rejected transient jump: keep the displayed real, just mark the device alive.
+  const r = await q("UPDATE devices SET last_seen=$2 WHERE id=$1 RETURNING *", [id, ts]);
   return rowToDevice(r.rows[0]);
 }
 async function touchLastSeen(id, ts) {

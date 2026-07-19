@@ -333,6 +333,7 @@ async function route(req, res) {
       Date.now(),
       j.accuracy,
       j.source,
+      j.diag,
     );
     sse.deviceChanged(deviceView(updated));
     return json(res, 200, { ok: true });

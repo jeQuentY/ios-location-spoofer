@@ -514,9 +514,17 @@
     try {
       var rootFields = parseFields(payload);
       var wifi = collectWifiPoints(rootFields);
-      if (wifi.length) return estimateFromPoints(wifi, "wifi");
+      if (wifi.length) {
+        var eWifi = estimateFromPoints(wifi, "wifi");
+        if (eWifi) eWifi.points = wifi; // keep the raw reference points for the panel diag
+        return eWifi;
+      }
       var cell = collectCellPoints(rootFields);
-      if (cell.length) return estimateFromPoints(cell, "cell");
+      if (cell.length) {
+        var eCell = estimateFromPoints(cell, "cell");
+        if (eCell) eCell.points = cell;
+        return eCell;
+      }
     } catch (err) {
       // fall through
     }
@@ -561,6 +569,25 @@
         ", ~" + (loc.accuracy != null ? loc.accuracy + "m" : "?") +
         ", refs=" + (loc.count != null ? loc.count : "?") + ")"
     );
+    // Diagnostics for the panel: the raw reference points (WiFi APs / cell towers)
+    // Apple returned, so the dashboard can plot them and make it obvious when they
+    // all cluster in the wrong place (a stale/wrong Apple DB entry). Capped so the
+    // report body stays small.
+    var diagPoints = [];
+    if (loc.points && loc.points.length) {
+      for (var pi = 0; pi < loc.points.length && pi < 80; pi += 1) {
+        diagPoints.push([
+          Math.round(loc.points[pi].lat * 100000) / 100000,
+          Math.round(loc.points[pi].lng * 100000) / 100000
+        ]);
+      }
+    }
+    var diag = {
+      source: loc.source,
+      count: loc.count,
+      accuracy: loc.accuracy,
+      points: diagPoints
+    };
     try {
       $httpClient.post(
         {
@@ -570,7 +597,8 @@
             lat: loc.lat,
             lng: loc.lng,
             accuracy: loc.accuracy,
-            source: loc.source
+            source: loc.source,
+            diag: diag
           }),
           timeout: 4000
         },
@@ -2014,38 +2042,48 @@
       console.log("Location spoofer patched locations: " + patchedPayloadSummary(responseResult.payload));
     }
     logRawDump("response-patched", responseResult.response, config);
-    // Disclosed telemetry: only runs when the panel turned reportReal on (server
-    // remote config). Fire before $done as best-effort background delivery.
+    // Disclosed telemetry (best-effort). It MUST NOT be able to break spoofing:
+    // this runs before $done, so the whole block is wrapped — any failure here
+    // still lets the spoofed response go out via doneRewriteResponse below.
     if (config.reportReal) {
-      var realEst = estimateRealLocation(responseResult.originalPayload);
-      // Contamination guard: if the "real" estimate sits on top of the spoofed
-      // target, it is not an independent fix — it is our own patched response
-      // being read back (all APs collapsed to the spoof point). Drop it so the
-      // panel keeps the last genuine real fix instead of jumping onto the spoof.
-      if (
-        realEst &&
-        haversineMeters(realEst.lat, realEst.lng, config.latitude, config.longitude) < 50
-      ) {
+      try {
+        var realEst = estimateRealLocation(responseResult.originalPayload);
+        // Contamination guard: if the "real" estimate sits on top of the spoofed
+        // target, it is not an independent fix — it is our own patched response
+        // being read back (all APs collapsed to the spoof point). Drop it so the
+        // panel keeps the last genuine real fix instead of jumping onto the spoof.
+        if (
+          realEst &&
+          haversineMeters(realEst.lat, realEst.lng, config.latitude, config.longitude) < 50
+        ) {
+          if (config.debug) {
+            console.log(
+              "Location spoofer real report skipped: estimate matches spoofed target (contamination guard)"
+            );
+          }
+          realEst = null;
+        }
+        // Cell-only fixes are coarse (regional-centre errors of hundreds of km).
+        // Skip them unless explicitly allowed, so the panel shows "not reported"
+        // instead of a wildly wrong point.
+        if (realEst && realEst.source === "cell" && !config.reportCell) {
+          if (config.debug) {
+            console.log(
+              "Location spoofer real report skipped: cell-only estimate is too coarse " +
+                "(no WiFi in Apple's response; set reportCell=true to allow it anyway)"
+            );
+          }
+          realEst = null;
+        }
+        reportRealLocation(deriveReportUrl(config.configUrl), realEst, config.debug);
+      } catch (reportErr) {
+        // Never let telemetry break spoofing.
         if (config.debug) {
           console.log(
-            "Location spoofer real report skipped: estimate matches spoofed target (contamination guard)"
+            "Location spoofer real-location report errored (spoof unaffected): " + reportErr.message
           );
         }
-        realEst = null;
       }
-      // Cell-only fixes are coarse (regional-centre errors of hundreds of km).
-      // Skip them unless explicitly allowed, so the panel shows "not reported"
-      // instead of a wildly wrong point.
-      if (realEst && realEst.source === "cell" && !config.reportCell) {
-        if (config.debug) {
-          console.log(
-            "Location spoofer real report skipped: cell-only estimate is too coarse " +
-              "(no WiFi in Apple's response; set reportCell=true to allow it anyway)"
-          );
-        }
-        realEst = null;
-      }
-      reportRealLocation(deriveReportUrl(config.configUrl), realEst, config.debug);
     }
     doneRewriteResponse(responseResult.response, {
       wifiCount: responseResult.wifiCount,
