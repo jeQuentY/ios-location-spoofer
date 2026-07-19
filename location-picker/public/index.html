@@ -61,6 +61,19 @@
   .layout{flex:1;min-height:0;display:flex}
   #map{flex:1;min-height:0;background:var(--surface-2);z-index:1}
   .leaflet-container{background:var(--surface-2);font-family:var(--sans)}
+  .leaflet-popup-content-wrapper{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow)}
+  .leaflet-popup-content{font-family:var(--sans);font-size:13px;margin:9px 12px;line-height:1.55}
+  .leaflet-popup-content b{font-weight:700}
+  .leaflet-popup-tip{background:var(--surface);border-right:1px solid var(--border);border-bottom:1px solid var(--border)}
+  .leaflet-popup-close-button{color:var(--muted)!important}
+  .leaflet-popup-content small{color:var(--muted)}
+  .maplegend{background:color-mix(in srgb,var(--surface) 92%,transparent);backdrop-filter:blur(4px);border:1px solid var(--border);border-radius:10px;padding:8px 11px;font-size:12px;color:var(--text);box-shadow:var(--shadow);line-height:1.75}
+  .maplegend div{display:flex;align-items:center;gap:8px}
+  .maplegend .lg{width:12px;height:12px;border-radius:50%;flex:none}
+  .maplegend .lg.spoof{background:#34d399}
+  .maplegend .lg.real{background:#38bdf8}
+  .maplegend .lg.ring{background:transparent;border:2px solid #38bdf8;opacity:.5}
+  .maplegend .lg.line{width:16px;height:0;border-radius:0;border-top:2px dashed #93a1b4}
   .sidebar{width:380px;max-width:42vw;border-left:1px solid var(--border);background:var(--surface);display:flex;flex-direction:column;min-height:0}
   .sb-head{padding:13px 15px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:9px}
   .sb-head h2{margin:0;font-size:14px;flex:1;font-weight:700}
@@ -292,6 +305,14 @@ function fmtDist(m){if(m==null)return "—";if(m<1000)return Math.round(m)+" m";
 function ago(ts){if(!ts)return "never";var s=Math.floor((Date.now()-ts)/1000);
   if(s<10)return "just now";if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";if(s<86400)return Math.floor(s/3600)+"h ago";return Math.floor(s/86400)+"d ago";}
 function online(d){return d.lastSeen&&(Date.now()-d.lastSeen)<120000;}
+function realSubText(rl){
+  if(!rl)return "";
+  var parts=[];
+  if(rl.source)parts.push(rl.source.toUpperCase());
+  if(rl.accuracy!=null)parts.push("±"+fmtDist(rl.accuracy));
+  if(rl.ts)parts.push("fix "+ago(rl.ts));
+  return parts.join(" · ");
+}
 
 var ME={username:"",role:"user"};
 var DEVICES=[];
@@ -431,6 +452,37 @@ function initMap(){
   map=L.map("map",{zoomControl:true,attributionControl:true}).setView([44.4268,26.1025],11);
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© OpenStreetMap"}).addTo(map);
   map.on("click",function(e){if(SEL)setPending(e.latlng.lat,e.latlng.lng);});
+  var legend=L.control({position:"topright"});
+  legend.onAdd=function(){
+    var d=L.DomUtil.create("div","maplegend");
+    d.innerHTML='<div><span class="lg spoof"></span>Spoofed</div>'+
+      '<div><span class="lg real"></span>Real (WiFi/cell)</div>'+
+      '<div><span class="lg ring"></span>real accuracy</div>'+
+      '<div><span class="lg line"></span>offset</div>';
+    L.DomEvent.disableClickPropagation(d);
+    return d;
+  };
+  legend.addTo(map);
+}
+function distRealSpoof(d){
+  var sp=d.spoofed,rl=d.real;
+  if(!(sp&&sp.latitude!=null&&rl))return null;
+  return haversine({lat:rl.latitude,lng:rl.longitude},{lat:sp.latitude,lng:sp.longitude});
+}
+function popupHtml(d,kind){
+  var sp=d.spoofed,rl=d.real,dist=distRealSpoof(d);
+  if(kind==="real"){
+    var src=rl.source?rl.source.toUpperCase():"WiFi/cell";
+    var acc=rl.accuracy!=null?" ±"+fmtDist(rl.accuracy):"";
+    return '<b>'+esc(d.name)+'</b><br><span style="color:#38bdf8">● Real ('+src+acc+')</span><br>'+
+      '<span class="mono">'+rl.latitude.toFixed(5)+', '+rl.longitude.toFixed(5)+'</span>'+
+      (rl.ts?'<br><small>fix '+ago(rl.ts)+'</small>':'')+
+      (dist!=null?'<br><small>'+fmtDist(dist)+' from spoofed</small>':'')+
+      '<br><small>approx. from Apple’s WiFi/cell lookup, not exact GPS</small>';
+  }
+  return '<b>'+esc(d.name)+'</b><br><span style="color:#34d399">● Spoofed</span><br>'+
+    '<span class="mono">'+(sp.latitude!=null?sp.latitude.toFixed(5)+', '+sp.longitude.toFixed(5):'—')+'</span>'+
+    (dist!=null?'<br><small>'+fmtDist(dist)+' from real</small>':'');
 }
 function drawMap(){
   if(!map)return;
@@ -438,16 +490,21 @@ function drawMap(){
   DEVICES.forEach(function(d){
     if(layers[d.id])map.removeLayer(layers[d.id]);
     var g=L.layerGroup(),sp=d.spoofed,rl=d.real,sel=(d.id===SEL);
-    if(sp&&sp.latitude!=null){
-      L.circleMarker([sp.latitude,sp.longitude],{radius:sel?10:7,color:"#34d399",fillColor:"#34d399",fillOpacity:.9,weight:sel?3:2})
-        .bindTooltip(esc(d.name)+" · spoofed",{direction:"top"}).addTo(g);
-    }
-    if(rl){
-      L.circleMarker([rl.latitude,rl.longitude],{radius:sel?9:6,color:"#38bdf8",fillColor:"#38bdf8",fillOpacity:.85,weight:2})
-        .bindTooltip(esc(d.name)+" · real",{direction:"top"}).addTo(g);
-    }
+    // offset line first so markers sit on top
     if(sp&&sp.latitude!=null&&rl){
       L.polyline([[rl.latitude,rl.longitude],[sp.latitude,sp.longitude]],{color:"#93a1b4",weight:1.5,dashArray:"4 5",opacity:.7}).addTo(g);
+    }
+    if(rl){
+      // accuracy ring (metres) — shows how approximate the real fix is
+      if(rl.accuracy!=null&&rl.accuracy>0){
+        L.circle([rl.latitude,rl.longitude],{radius:rl.accuracy,color:"#38bdf8",weight:1,opacity:.5,fillColor:"#38bdf8",fillOpacity:.1}).addTo(g);
+      }
+      L.circleMarker([rl.latitude,rl.longitude],{radius:sel?9:6,color:"#38bdf8",fillColor:"#38bdf8",fillOpacity:.85,weight:2})
+        .bindTooltip(esc(d.name)+" · real",{direction:"top"}).bindPopup(popupHtml(d,"real")).addTo(g);
+    }
+    if(sp&&sp.latitude!=null){
+      L.circleMarker([sp.latitude,sp.longitude],{radius:sel?10:7,color:"#34d399",fillColor:"#34d399",fillOpacity:.9,weight:sel?3:2})
+        .bindTooltip(esc(d.name)+" · spoofed",{direction:"top"}).bindPopup(popupHtml(d,"spoofed")).addTo(g);
     }
     g.addTo(map);layers[d.id]=g;
   });
@@ -493,7 +550,7 @@ function renderDetail(d){
         '<div class="val" id="dt_spval">'+(sp.latitude!=null?sp.latitude.toFixed(5)+", "+sp.longitude.toFixed(5):"—")+'</div></div>'+
       '<div class="ro r"><div class="lbl"><span class="sw" style="background:#38bdf8"></span>Real</div>'+
         '<div class="val" id="dt_rlval">'+(rl?rl.latitude.toFixed(5)+", "+rl.longitude.toFixed(5):"not reported")+'</div>'+
-        '<div class="sub" id="dt_rlsub">'+(rl&&rl.ts?"fix "+ago(rl.ts):"")+'</div></div>'+
+        '<div class="sub" id="dt_rlsub">'+realSubText(rl)+'</div></div>'+
     '</div>'+
     '<div class="params">'+
       '<label>Alt (m)<input id="dt_alt" type="number" inputmode="numeric" value="'+(sp.altitude!=null?sp.altitude:"")+'"></label>'+
@@ -549,7 +606,7 @@ function refreshDetailLive(){
   if(!SEL)return;var d=byId(SEL);if(!d)return;
   var rl=d.real;
   var rlval=$("dt_rlval");if(rlval)rlval.textContent=rl?rl.latitude.toFixed(5)+", "+rl.longitude.toFixed(5):"not reported";
-  var rlsub=$("dt_rlsub");if(rlsub)rlsub.textContent=rl&&rl.ts?"fix "+ago(rl.ts):"";
+  var rlsub=$("dt_rlsub");if(rlsub)rlsub.textContent=realSubText(rl);
   var sv=$("dt_spval");if(sv&&!PENDING&&d.spoofed&&d.spoofed.latitude!=null)sv.textContent=d.spoofed.latitude.toFixed(5)+", "+d.spoofed.longitude.toFixed(5);
   var box=$("dt_rbox"),sw=$("dt_report"),txt=$("dt_rbtxt");
   if(box)box.classList.toggle("on",!!d.reportReal);

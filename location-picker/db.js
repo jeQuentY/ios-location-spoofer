@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS devices (
   real_lng    DOUBLE PRECISION,
   real_alt    INTEGER,
   real_ts     BIGINT,
+  real_acc    DOUBLE PRECISION,
+  real_src    TEXT,
   last_seen   BIGINT,
   last_report BIGINT,
   created_at  BIGINT NOT NULL
@@ -75,10 +77,21 @@ CREATE TABLE IF NOT EXISTS position_reports (
   lat       DOUBLE PRECISION NOT NULL,
   lng       DOUBLE PRECISION NOT NULL,
   alt       INTEGER,
+  acc       INTEGER,
+  src       TEXT,
   ts        BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reports_device_ts ON position_reports(device_id, ts DESC);
 `;
+
+// Best-effort, idempotent upgrades for databases created by an earlier version.
+// Failures are ignored (a fresh DB already has these columns from SCHEMA).
+const MIGRATIONS = [
+  "ALTER TABLE devices ADD COLUMN IF NOT EXISTS real_acc DOUBLE PRECISION",
+  "ALTER TABLE devices ADD COLUMN IF NOT EXISTS real_src TEXT",
+  "ALTER TABLE position_reports ADD COLUMN IF NOT EXISTS acc INTEGER",
+  "ALTER TABLE position_reports ADD COLUMN IF NOT EXISTS src TEXT",
+];
 
 // ---------- row mapping ----------
 // Map a devices row to the object shape the HTTP layer and frontend expect.
@@ -104,6 +117,8 @@ function rowToDevice(r) {
             latitude: r.real_lat,
             longitude: r.real_lng,
             altitude: r.real_alt != null ? r.real_alt : undefined,
+            accuracy: r.real_acc != null ? Number(r.real_acc) : null,
+            source: r.real_src || null,
             ts: r.real_ts != null ? Number(r.real_ts) : null,
           }
         : null,
@@ -258,16 +273,20 @@ async function setReportReal(id, on) {
   await q("DELETE FROM position_reports WHERE device_id=$1", [id]);
   return rowToDevice(r.rows[0]);
 }
-async function recordReal(id, la, lo, alt, ts) {
+async function recordReal(id, la, lo, alt, ts, acc, src) {
   const altInt = Number.isFinite(Number(alt)) ? Math.round(Number(alt)) : null;
+  const accInt =
+    Number.isFinite(Number(acc)) && Number(acc) >= 0 ? Math.round(Number(acc)) : null;
+  const source = src === "wifi" || src === "cell" ? src : null;
   const r = await q(
     `UPDATE devices SET real_lat=$2, real_lng=$3, real_alt=$4,
-        real_ts=$5, last_report=$5, last_seen=$5 WHERE id=$1 RETURNING *`,
-    [id, la, lo, altInt, ts],
+        real_ts=$5, real_acc=$6, real_src=$7, last_report=$5, last_seen=$5
+       WHERE id=$1 RETURNING *`,
+    [id, la, lo, altInt, ts, accInt, source],
   );
   await q(
-    "INSERT INTO position_reports(device_id, lat, lng, alt, ts) VALUES($1,$2,$3,$4,$5)",
-    [id, la, lo, altInt, ts],
+    "INSERT INTO position_reports(device_id, lat, lng, alt, acc, src, ts) VALUES($1,$2,$3,$4,$5,$6,$7)",
+    [id, la, lo, altInt, accInt, source, ts],
   );
   return rowToDevice(r.rows[0]);
 }
@@ -279,13 +298,15 @@ async function deleteDevice(id) {
 }
 async function deviceHistory(id, limit) {
   const r = await q(
-    "SELECT lat, lng, alt, ts FROM position_reports WHERE device_id=$1 ORDER BY ts DESC LIMIT $2",
+    "SELECT lat, lng, alt, acc, src, ts FROM position_reports WHERE device_id=$1 ORDER BY ts DESC LIMIT $2",
     [id, Math.min(Math.max(Number(limit) || 50, 1), 500)],
   );
   return r.rows.map((x) => ({
     latitude: x.lat,
     longitude: x.lng,
     altitude: x.alt != null ? x.alt : undefined,
+    accuracy: x.acc != null ? Number(x.acc) : null,
+    source: x.src || null,
     ts: Number(x.ts),
   }));
 }
@@ -373,6 +394,14 @@ async function init(opts) {
   for (const stmt of SCHEMA.split(";")) {
     const s = stmt.trim();
     if (s) await q(s);
+  }
+  // Upgrade older databases; ignore per-statement failures (already-applied).
+  for (const stmt of MIGRATIONS) {
+    try {
+      await q(stmt);
+    } catch (e) {
+      /* column already exists or unsupported ADD IF NOT EXISTS — fine */
+    }
   }
   if (opts.legacyDataFile) await importLegacyJson(opts.legacyDataFile);
   return true;

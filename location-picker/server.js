@@ -325,7 +325,15 @@ async function route(req, res) {
     const la = Number(j.lat),
       lo = Number(j.lng);
     if (!validCoords(la, lo)) return json(res, 400, { error: "bad coords" });
-    const updated = await db.recordReal(d.id, la, lo, j.altitude, Date.now());
+    const updated = await db.recordReal(
+      d.id,
+      la,
+      lo,
+      j.altitude,
+      Date.now(),
+      j.accuracy,
+      j.source,
+    );
     sse.deviceChanged(deviceView(updated));
     return json(res, 200, { ok: true });
   }

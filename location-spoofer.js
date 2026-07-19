@@ -439,35 +439,89 @@
     }
   }
 
-  // Best-effort real position from an UNPATCHED AppleWLoc payload: the first WiFi
-  // AP coordinate (else first cell tower). Approximates the device's true area.
-  function extractFirstRealLocation(payload) {
-    try {
-      var rootFields = parseFields(payload);
-      var wifi = firstFieldByNumber(rootFields, 2);
-      if (wifi && wifi.wireType === 2) {
-        var wloc = firstFieldByNumber(parseFields(wifi.valueBytes), 2);
+  function haversineMeters(aLat, aLng, bLat, bLng) {
+    var R = 6371000, toR = Math.PI / 180;
+    var dLat = (bLat - aLat) * toR, dLng = (bLng - aLng) * toR;
+    var s = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(aLat * toR) * Math.cos(bLat * toR) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.sqrt(s));
+  }
+
+  function medianOf(values) {
+    if (!values.length) return null;
+    var a = values.slice().sort(function (x, y) { return x - y; });
+    var m = Math.floor(a.length / 2);
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  }
+
+  // Every valid WiFi AP coordinate from an UNPATCHED AppleWLoc payload.
+  function collectWifiPoints(rootFields) {
+    var pts = [];
+    for (var i = 0; i < rootFields.length; i += 1) {
+      var f = rootFields[i];
+      if (f.fieldNumber === 2 && f.wireType === 2) {
+        var wloc = firstFieldByNumber(parseFields(f.valueBytes), 2);
         if (wloc) {
           var r = latLngFromLocation(wloc.valueBytes);
-          if (r) {
-            return r;
-          }
+          if (r) pts.push(r);
         }
       }
-      var cell = firstCellResponseField(rootFields);
-      if (cell && cell.wireType === 2) {
-        var cloc = firstFieldByNumber(parseFields(cell.valueBytes), 5);
+    }
+    return pts;
+  }
+
+  function collectCellPoints(rootFields) {
+    var pts = [];
+    for (var i = 0; i < rootFields.length; i += 1) {
+      var f = rootFields[i];
+      if (isCellResponseField(f.fieldNumber) && f.wireType === 2) {
+        var cloc = firstFieldByNumber(parseFields(f.valueBytes), 5);
         if (cloc) {
-          var r2 = latLngFromLocation(cloc.valueBytes);
-          if (r2) {
-            return r2;
-          }
+          var r = latLngFromLocation(cloc.valueBytes);
+          if (r) pts.push(r);
         }
       }
+    }
+    return pts;
+  }
+
+  // Robust point estimate from a set of reference points: the component-wise
+  // MEDIAN (drops the far-away neighbour APs Apple pads the response with, so the
+  // estimate lands in the dense cluster where the device actually is). Accuracy is
+  // the ~68th-percentile distance from that point — a rough 1-sigma radius.
+  function estimateFromPoints(points, source) {
+    if (!points.length) return null;
+    var la = medianOf(points.map(function (p) { return p.lat; }));
+    var lo = medianOf(points.map(function (p) { return p.lng; }));
+    var dists = points
+      .map(function (p) { return haversineMeters(la, lo, p.lat, p.lng); })
+      .sort(function (a, b) { return a - b; });
+    var idx = Math.min(dists.length - 1, Math.floor(dists.length * 0.68));
+    return { lat: la, lng: lo, accuracy: Math.round(dists[idx] || 0), source: source, count: points.length };
+  }
+
+  // Best available REAL position from an UNPATCHED AppleWLoc payload. Prefers the
+  // WiFi APs (accurate to tens of metres); falls back to cell towers (coarser).
+  // This is derived from Apple's WiFi/cell geolocation database — it is NOT the
+  // device's exact fused GPS, which never appears in this traffic and cannot be
+  // recovered from it. The returned `accuracy` says how approximate it is.
+  function estimateRealLocation(payload) {
+    try {
+      var rootFields = parseFields(payload);
+      var wifi = collectWifiPoints(rootFields);
+      if (wifi.length) return estimateFromPoints(wifi, "wifi");
+      var cell = collectCellPoints(rootFields);
+      if (cell.length) return estimateFromPoints(cell, "cell");
     } catch (err) {
       // fall through
     }
     return null;
+  }
+
+  // Kept for compatibility: single point (no accuracy) via the robust estimate.
+  function extractFirstRealLocation(payload) {
+    var est = estimateRealLocation(payload);
+    return est ? { lat: est.lat, lng: est.lng } : null;
   }
 
   // The /report endpoint lives next to /loc.json on the same host, same token.
@@ -497,14 +551,22 @@
     }
     console.log(
       "Location spoofer reporting REAL location (reportReal=on, enabled by panel): " +
-        loc.lat.toFixed(5) + "," + loc.lng.toFixed(5)
+        loc.lat.toFixed(5) + "," + loc.lng.toFixed(5) +
+        " (source=" + (loc.source || "?") +
+        ", ~" + (loc.accuracy != null ? loc.accuracy + "m" : "?") +
+        ", refs=" + (loc.count != null ? loc.count : "?") + ")"
     );
     try {
       $httpClient.post(
         {
           url: reportUrl,
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ lat: loc.lat, lng: loc.lng }),
+          body: JSON.stringify({
+            lat: loc.lat,
+            lng: loc.lng,
+            accuracy: loc.accuracy,
+            source: loc.source
+          }),
           timeout: 4000
         },
         function (error) {
@@ -1945,7 +2007,7 @@
     if (config.reportReal) {
       reportRealLocation(
         deriveReportUrl(config.configUrl),
-        extractFirstRealLocation(responseResult.originalPayload),
+        estimateRealLocation(responseResult.originalPayload),
         config.debug
       );
     }
@@ -2108,6 +2170,7 @@
     spoofAppleResponse: spoofAppleResponse,
     latLngFromLocation: latLngFromLocation,
     extractFirstRealLocation: extractFirstRealLocation,
+    estimateRealLocation: estimateRealLocation,
     deriveReportUrl: deriveReportUrl,
     parseArgumentString: parseArgumentString,
     configFromArgs: configFromArgs,
